@@ -86,7 +86,7 @@ const servers = {
         return;
       }
 
-      socket = new WebSocket("ws://videochat-k8rf.onrender.com/ws");
+      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
 
       socket.onopen = async () => {
         console.log("Connected to signaling server");
