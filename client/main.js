@@ -135,6 +135,10 @@ function connectSocket() {
 
     try {
       if (msg.type === "offer" && !isCaller) {
+         if (!localStream) {
+    console.warn("Received offer before webcam initialized. Ignoring.");
+    return;
+  }
         showIncomingCallPopup(msg);
 
       } else if (msg.type === "answer" && isCaller) {
