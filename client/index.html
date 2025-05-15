@@ -35,6 +35,33 @@
 
     <button id="hangupButton" disabled>Hangup</button>
 
+     <!-- Incoming call modal -->
+<div id="incomingModal" style="
+display: none;
+position: fixed;
+top: 0; left: 0; right: 0; bottom: 0;
+background: rgba(0, 0, 0, 0.6);
+display: flex;
+align-items: center;
+justify-content: center;
+z-index: 9999;">
+<div style="
+  background: white;
+  padding: 30px;
+  border-radius: 12px;
+  box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+  text-align: center;
+  min-width: 300px;">
+  <h2>📞 Incoming Call</h2>
+  <p>Someone is calling you...</p>
+  <button id="acceptCallBtn" style="margin: 10px;">✅ Accept</button>
+  <button id="rejectCallBtn" style="margin: 10px;">❌ Reject</button>
+</div>
+</div>
+
+<!-- Optional ringtone -->
+<audio id="ringtone" src="facetime_call" preload="auto" loop></audio>
+
     <script  src="/main.js"></script>
 
   </body>
