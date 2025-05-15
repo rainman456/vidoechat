@@ -70,20 +70,22 @@ webcamButton.onclick = async () => {
   }
 };
 
-function connectSocket() {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    if (!isCaller && currentCallId) {
-      socket.send(JSON.stringify({
-        type: "join_call",
-        callId: currentCallId,
-      }));
-    }
-    return;
-  }
 
-  if (socket && socket.readyState === WebSocket.CONNECTING) {
-    return;
-  }
+callButton.onclick = async () => {
+  isCaller = true;
+  currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
+
+  connectSocket();
+
+  hangupButton.disabled = false;
+  callButton.disabled = true;
+  webcamButton.disabled = true;
+};
+
+answerButton.style.display = "none"; // hide answer button (not needed anymore)
+
+function connectSocket() {
+  if (socket && socket.readyState === WebSocket.OPEN) return;
 
   socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
 
@@ -98,20 +100,14 @@ function connectSocket() {
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-
         socket.send(JSON.stringify({
           type: "offer",
           callId: currentCallId,
           data: JSON.stringify(pc.localDescription),
         }));
       } catch (e) {
-        console.error("Error creating or sending offer:", e);
+        console.error("Error creating/sending offer:", e);
       }
-    } else if (!isCaller && currentCallId) {
-      socket.send(JSON.stringify({
-        type: "join_call",
-        callId: currentCallId,
-      }));
     }
   };
 
@@ -120,25 +116,24 @@ function connectSocket() {
     try {
       msg = JSON.parse(event.data);
     } catch (e) {
-      console.error("Received non-JSON message:", event.data);
+      console.error("Invalid JSON:", event.data);
       return;
     }
 
-    if (msg.callId && !currentCallId) {
+    if (!msg.callId) return;
+
+    // Auto-sync callId
+    if (!currentCallId) {
       currentCallId = msg.callId;
-      callInput.value = currentCallId;
-      console.log(`Initialized currentCallId from incoming message: ${currentCallId}`);
-    } else if (msg.callId && msg.callId !== currentCallId) {
-      console.warn(`Received message for different callId: ${msg.callId}. Current: ${currentCallId}. Ignoring.`);
-      return;
+      console.log("Joined callId:", currentCallId);
     }
 
     try {
       if (msg.type === "offer" && !isCaller) {
-         if (!localStream) {
-    console.warn("Received offer before webcam initialized. Ignoring.");
-    return;
-  }
+        if (!localStream) {
+          console.warn("Webcam not initialized yet.");
+          return;
+        }
         showIncomingCallPopup(msg);
 
       } else if (msg.type === "answer" && isCaller) {
@@ -148,121 +143,27 @@ function connectSocket() {
 
       } else if (msg.type === "ice-candidate") {
         const candidate = new RTCIceCandidate(JSON.parse(msg.data));
-        if (pc.remoteDescription && pc.remoteDescription.type) {
+        if (pc.remoteDescription) {
           await pc.addIceCandidate(candidate);
         } else {
           pendingCandidates.push(candidate);
         }
 
-      } else if (msg.type === "error") {
-        console.error("Signaling error:", msg.message);
-        alert("Signaling error: " + msg.message);
-
-      } else if (msg.type === "call_joined" && !isCaller) {
-        console.log("Successfully joined call. Waiting for offer.");
-
       } else if (msg.type === "peer_disconnected") {
-        alert("The other user has disconnected.");
+        alert("Other user hung up.");
         resetCallState();
       }
-
     } catch (err) {
-      console.error("Error processing message or WebRTC operation:", err, "Original message:", msg);
+      console.error("WebRTC error:", err, msg);
     }
-  };
-
-  socket.onclose = () => {
-    console.log("Disconnected from signaling server");
-  };
-
-  socket.onerror = (error) => {
-    console.error("WebSocket Error:", error);
-    alert("Could not connect to the signaling server. Please ensure it's running and accessible.");
   };
 }
 
-callButton.onclick = async () => {
-  isCaller = true;
-  currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
-  callInput.value = currentCallId;
-  callInput.readOnly = true;
+// Remove answerButton.onclick entirely
 
-  connectSocket();
+// ...keep hangupButton.onclick and resetCallState() the same
 
-  hangupButton.disabled = false;
-  callButton.disabled = true;
-  answerButton.disabled = true;
-};
-
-answerButton.onclick = async () => {
-  isCaller = false;
-  currentCallId = callInput.value.trim();
-  callInput.readOnly = true;
-
-  if (!currentCallId) {
-    alert("Please enter a Call ID to answer.");
-    callInput.readOnly = false;
-    return;
-  }
-
-  connectSocket();
-
-  hangupButton.disabled = false;
-  callButton.disabled = true;
-  answerButton.disabled = true;
-};
-
-hangupButton.onclick = async () => {
-  if (socket && socket.readyState === WebSocket.OPEN && currentCallId) {
-    socket.send(JSON.stringify({
-      type: "hangup",
-      callId: currentCallId,
-    }));
-  }
-  resetCallState();
-};
-
-function resetCallState() {
-  if (pc) {
-    pc.ontrack = null;
-    pc.onicecandidate = null;
-
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-      localStream = null;
-    }
-
-    if (remoteStream) {
-      remoteStream.getTracks().forEach(track => track.stop());
-      remoteStream = null;
-    }
-
-    webcamVideo.srcObject = null;
-    remoteVideo.srcObject = null;
-
-    pc.close();
-    pc = null;
-  }
-
-  if (socket) {
-    socket.close();
-    socket = null;
-  }
-
-  currentCallId = null;
-  isCaller = false;
-  pendingCandidates = [];
-
-  callInput.value = "";
-  callInput.readOnly = false;
-
-  callButton.disabled = true;
-  answerButton.disabled = true;
-  hangupButton.disabled = true;
-  webcamButton.disabled = false;
-}
-
-// Show popup modal for incoming offer
+// ✅ Modify showIncomingCallPopup to completely automate the join
 function showIncomingCallPopup(msg) {
   const modal = document.getElementById('incomingModal');
   const ringtone = document.getElementById('ringtone');
@@ -304,17 +205,20 @@ function showIncomingCallPopup(msg) {
     ringtone.pause();
     ringtone.currentTime = 0;
     modal.style.display = 'none';
-    // Optionally notify the caller here
   };
 
+  // Auto-accept after 10s (optional)
   setTimeout(() => {
     if (modal.style.display !== 'none') {
       acceptBtn.click();
     }
-  }, 15000); // auto-accept after 15 seconds
+  }, 10000);
 }
+
+// Disable manual input fields
+callInput.style.display = 'none';
+answerButton.style.display = 'none';
 
 // Initial UI state
 callButton.disabled = true;
-answerButton.disabled = true;
 hangupButton.disabled = true;
