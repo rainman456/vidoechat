@@ -125,10 +125,15 @@ const servers = {
           return;
         }
 
-        if (msg.callId && msg.callId !== currentCallId) {
-          console.warn(`Received message for different callId: ${msg.callId}. Current: ${currentCallId}. Ignoring.`);
-          return;
-        }
+        if (msg.callId && !currentCallId) {
+  currentCallId = msg.callId;
+  callInput.value = currentCallId;
+  console.log(`Initialized currentCallId from incoming message: ${currentCallId}`);
+} else if (msg.callId && msg.callId !== currentCallId) {
+  console.warn(`Received message for different callId: ${msg.callId}. Current: ${currentCallId}. Ignoring.`);
+  return;
+}
+
 
         try {
           if (msg.type === "offer" && !isCaller) {
