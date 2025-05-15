@@ -474,3 +474,7 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
+window.addEventListener('DOMContentLoaded', () => {
+    connectSocket(); // Connect to WebSocket when page loads
+});
+
