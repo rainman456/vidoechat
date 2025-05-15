@@ -110,7 +110,9 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	for conn := range idleClients {
 		if conn != sender {
 			rooms[msg.CallID].clients[conn] = true
-			clients[conn].callID = msg.CallID
+			if client, ok := clients[conn]; ok {
+				client.callID = msg.CallID
+			}
 			delete(idleClients, conn) // Callee is no longer idle
 
 			// Send join notification and offer
@@ -149,6 +151,11 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 			err := client.WriteJSON(msg)
 			if err != nil {
 				log.Printf("error sending answer: %v", err)
+				clientsMu.Lock()
+				delete(clients, client)
+				delete(idleClients, client)
+				clientsMu.Unlock()
+				client.Close()
 			}
 		}
 	}
@@ -170,6 +177,11 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 			err := client.WriteJSON(msg)
 			if err != nil {
 				log.Printf("error sending ICE candidate: %v", err)
+				clientsMu.Lock()
+				delete(clients, client)
+				delete(idleClients, client)
+				clientsMu.Unlock()
+				client.Close()
 			}
 		}
 	}
@@ -222,9 +234,20 @@ func handleHangup(sender *websocket.Conn, callID string) {
 		}
 	}
 
-	// Clean up room if empty or close it
+	// Clean up client state
+	clientsMu.Lock()
+	for client := range room.clients {
+		if c, ok := clients[client]; ok {
+			c.callID = ""               // Reset call ID
+			idleClients[client] = true // Make them available for another call
+		}
+	}
+	clientsMu.Unlock()
+
+	// Delete the room
 	delete(rooms, callID)
 }
+
 
 func main() {
 	fs := http.FileServer(http.Dir("./client"))
