@@ -4,74 +4,84 @@ import (
 	"log"
 	"net/http"
 	"sync"
-	"time"
 
-	"github.com/google/uuid" // For generating unique client IDs
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
-// Constants for client status
+// Client statuses
 const (
-	statusIdle    = "idle"
-	statusCalling = "calling" // Client has initiated a call, waiting for someone to accept
-	statusInCall  = "in-call"
+	StatusIdle    = "idle"
+	StatusCalling = "calling"
+	StatusInCall  = "in-call"
 )
 
+// upgrader upgrades HTTP connections to WebSocket connections
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // For development. In production, validate the origin.
-	},
+	CheckOrigin:     func(r *http.Request) bool { return true }, // TODO: secure origin check in production
 }
 
-// ClientInfo holds information about a connected client
+// ClientInfo stores info about each connected client
 type ClientInfo struct {
 	Conn     *websocket.Conn
-	ID       string // Unique ID for this client
-	Status   string // "idle", "calling", "in-call"
-	CallID   string // If Status is "calling" or "in-call", this is the associated call ID
-	isCaller bool   // True if this client initiated the current/pending call
+	ID       string
+	Status   string
+	CallID   string
+	IsCaller bool
 }
 
-// Message defines the structure for WebSocket messages
+// Message is the JSON structure for WebSocket communication
 type Message struct {
 	Type     string `json:"type"`
 	CallID   string `json:"callId,omitempty"`
-	Data     string `json:"data,omitempty"`     // For SDP offer, answer, ICE candidate
-	CallerID string `json:"callerId,omitempty"` // ID of the client who initiated the call
-	Reason   string `json:"reason,omitempty"`   // Optional reason for rejection etc.
+	Data     string `json:"data,omitempty"`     // SDP or ICE candidate
+	CallerID string `json:"callerId,omitempty"` // Initiator client ID
+	Reason   string `json:"reason,omitempty"`   // Optional rejection reason
 }
 
-// Room holds information about an active call session
+// Room represents a call session with participants
 type Room struct {
 	ID           string
-	Participants map[*websocket.Conn]bool // Pointers to participant connections
-	// OfferSDP  string // The initial offer, might be useful if a late joiner needs it
+	Participants map[*websocket.Conn]bool
 }
 
 var (
-	clients     = make(map[*websocket.Conn]*ClientInfo) // Map connection to ClientInfo
-	clientsByID = make(map[string]*ClientInfo)      // Map client ID to ClientInfo for easy lookup
-	rooms       = make(map[string]*Room)            // Map callID to Room
+	clients     = make(map[*websocket.Conn]*ClientInfo)
+	clientsByID = make(map[string]*ClientInfo)
+	rooms       = make(map[string]*Room)
 
-	// Mutexes to protect shared access
 	clientsMu sync.RWMutex
 	roomsMu   sync.RWMutex
 )
 
+// helper: safely send a message to a client connection
+func sendMessage(conn *websocket.Conn, msg Message) {
+	if err := conn.WriteJSON(msg); err != nil {
+		log.Printf("Error sending message to client: %v", err)
+	}
+}
+
+// helper: reset client state to idle
+func resetClientState(client *ClientInfo) {
+	client.Status = StatusIdle
+	client.CallID = ""
+	client.IsCaller = false
+}
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
+		log.Printf("Upgrade failed: %v", err)
 		return
 	}
 
-	clientID := uuid.New().String() // Generate a unique ID for the client
+	clientID := uuid.New().String()
 	client := &ClientInfo{
 		Conn:   ws,
 		ID:     clientID,
-		Status: statusIdle,
+		Status: StatusIdle,
 	}
 
 	clientsMu.Lock()
@@ -82,14 +92,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		clientsMu.Lock()
-		currentClientInfo := clients[ws] // Get the most up-to-date info
-		if currentClientInfo != nil {
-			log.Printf("Client %s disconnecting. Status: %s, CallID: %s", currentClientInfo.ID, currentClientInfo.Status, currentClientInfo.CallID)
-			if currentClientInfo.Status == statusInCall || currentClientInfo.Status == statusCalling {
-				// If client was in a call or initiating one, notify the other party / clean up room
-				handleHangupInternal(ws, currentClientInfo.CallID, "peer_disconnected_unexpectedly")
+		if c, ok := clients[ws]; ok {
+			log.Printf("Client %s disconnecting. Status: %s, CallID: %s", c.ID, c.Status, c.CallID)
+			if c.Status == StatusInCall || c.Status == StatusCalling {
+				handleHangupInternal(ws, c.CallID, "peer_disconnected_unexpectedly")
 			}
-			delete(clientsByID, currentClientInfo.ID)
+			delete(clientsByID, c.ID)
 		}
 		delete(clients, ws)
 		log.Printf("Client %s removed. Total clients: %d", clientID, len(clients))
@@ -102,20 +110,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		err := ws.ReadJSON(&msg)
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
-				log.Printf("Client %s read error (unexpected close): %v", clientID, err)
-			} else if err.Error() == "websocket: close 1001 (going away)" || err.Error() == "websocket: close 1000 (normal)" {
-				log.Printf("Client %s disconnected gracefully.", clientID)
+				log.Printf("Client %s unexpected close error: %v", clientID, err)
 			} else {
 				log.Printf("Client %s read error: %v", clientID, err)
 			}
-			break // Exit loop on read error (client disconnected or other issue)
+			break
 		}
 
-		log.Printf("Received message from %s: Type=%s, CallID=%s", clientID, msg.Type, msg.CallID)
-
-		// Associate sender's client ID with the message if not already present
-		// This is more for server-side logic than for forwarding, as client already knows its ID.
-		// msg.SenderID = clientID // Not strictly needed for client-server messages if client doesn't use it
+		log.Printf("Received from %s: Type=%s, CallID=%s", clientID, msg.Type, msg.CallID)
 
 		switch msg.Type {
 		case "initiate_call":
@@ -130,248 +132,197 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			handleHangupInternal(ws, msg.CallID, "hangup_request")
 		default:
 			log.Printf("Unknown message type from %s: %s", clientID, msg.Type)
-			// Optionally send an error back to the client
-			// client.Conn.WriteJSON(Message{Type: "error", Data: "Unknown message type"})
+			sendMessage(ws, Message{Type: "error", Data: "Unknown message type"})
 		}
 	}
 }
 
 func handleInitiateCall(caller *ClientInfo, msg Message) {
 	clientsMu.Lock()
-	if caller.Status != statusIdle {
-		log.Printf("Client %s tried to initiate call but is not idle (status: %s)", caller.ID, caller.Status)
-		caller.Conn.WriteJSON(Message{Type: "error", CallID: msg.CallID, Data: "Cannot initiate call, already in a call or calling."})
+	if caller.Status != StatusIdle {
 		clientsMu.Unlock()
+		log.Printf("Client %s tried to initiate call but status is %s", caller.ID, caller.Status)
+		sendMessage(caller.Conn, Message{Type: "error", CallID: msg.CallID, Data: "Cannot initiate call, already busy."})
 		return
 	}
-	caller.Status = statusCalling
+	caller.Status = StatusCalling
 	caller.CallID = msg.CallID
-	caller.isCaller = true
-	clientsMu.Unlock() // Unlock early before iterating
+	caller.IsCaller = true
+	clientsMu.Unlock()
 
-	log.Printf("Client %s initiated call %s. Broadcasting to idle clients.", caller.ID, msg.CallID)
+	log.Printf("Client %s initiated call %s, notifying idle clients", caller.ID, msg.CallID)
 
-	// Message to send to potential callees
-	incomingCallMsg := Message{
+	incomingCall := Message{
 		Type:     "incoming_call",
 		CallID:   msg.CallID,
-		Data:     msg.Data, // This is the offer SDP
+		Data:     msg.Data,
 		CallerID: caller.ID,
 	}
 
-	clientsMu.RLock() // Use RLock for reading clients map
-	idleClientCount := 0
-	for conn, potentialCallee := range clients {
-		if potentialCallee.ID != caller.ID && potentialCallee.Status == statusIdle {
-			log.Printf("Sending incoming_call for %s to idle client %s", msg.CallID, potentialCallee.ID)
-			if err := conn.WriteJSON(incomingCallMsg); err != nil {
-				log.Printf("Error sending incoming_call to %s: %v", potentialCallee.ID, err)
-				// Consider marking this client for cleanup if write fails
+	clientsMu.RLock()
+	idleCount := 0
+	for conn, c := range clients {
+		if c.ID != caller.ID && c.Status == StatusIdle {
+			if err := conn.WriteJSON(incomingCall); err != nil {
+				log.Printf("Error sending incoming_call to %s: %v", c.ID, err)
+			} else {
+				idleCount++
 			}
-			idleClientCount++
 		}
 	}
 	clientsMu.RUnlock()
 
-	if idleClientCount == 0 {
-		log.Printf("No idle clients found for call %s initiated by %s.", msg.CallID, caller.ID)
-		// Notify caller that no one is available
-		caller.Conn.WriteJSON(Message{Type: "error", CallID: msg.CallID, Data: "No idle users available to call."})
+	if idleCount == 0 {
+		log.Printf("No idle clients for call %s from %s", msg.CallID, caller.ID)
+		sendMessage(caller.Conn, Message{Type: "error", CallID: msg.CallID, Data: "No idle users available."})
 		clientsMu.Lock()
-		caller.Status = statusIdle // Reset caller's status
-		caller.CallID = ""
-		caller.isCaller = false
+		resetClientState(caller)
 		clientsMu.Unlock()
 	}
 }
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
+	// Lock rooms first, then clients to avoid deadlock
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
-	clientsMu.Lock() // Lock clientsMu as well for updating client statuses
+	clientsMu.Lock()
 	defer clientsMu.Unlock()
 
-	if _, roomExists := rooms[msg.CallID]; roomExists {
-		log.Printf("Call %s already taken. Client %s tried to accept.", msg.CallID, callee.ID)
-		callee.Conn.WriteJSON(Message{Type: "call_taken", CallID: msg.CallID, Data: "This call has already been accepted."})
+	if _, exists := rooms[msg.CallID]; exists {
+		log.Printf("Call %s already accepted, callee %s tried to accept", msg.CallID, callee.ID)
+		sendMessage(callee.Conn, Message{Type: "call_taken", CallID: msg.CallID, Data: "Call already accepted"})
 		return
 	}
 
-	// Find the original caller
+	// Find caller who initiated the call
 	var caller *ClientInfo
-	for _, c := range clientsByID { // Iterate through clientsByID for easier lookup
-		if c.CallID == msg.CallID && c.isCaller {
+	for _, c := range clientsByID {
+		if c.CallID == msg.CallID && c.IsCaller {
 			caller = c
 			break
 		}
 	}
-
-	if caller == nil || caller.Status != statusCalling {
-		log.Printf("No active caller found for call ID %s, or caller not in 'calling' state. Callee: %s", msg.CallID, callee.ID)
-		callee.Conn.WriteJSON(Message{Type: "error", CallID: msg.CallID, Data: "Call not found or caller no longer available."})
+	if caller == nil || caller.Status != StatusCalling {
+		log.Printf("No active caller for call %s, callee %s", msg.CallID, callee.ID)
+		sendMessage(callee.Conn, Message{Type: "error", CallID: msg.CallID, Data: "Call not found or caller unavailable"})
 		return
 	}
-	
-	if callee.Status != statusIdle {
-        log.Printf("Client %s tried to accept call %s but is not idle (status: %s)", callee.ID, msg.CallID, callee.Status)
-        callee.Conn.WriteJSON(Message{Type: "error", CallID: msg.CallID, Data: "Cannot accept call, you are not idle."})
-        return
-    }
 
+	if callee.Status != StatusIdle {
+		log.Printf("Client %s not idle (status %s), cannot accept call %s", callee.ID, callee.Status, msg.CallID)
+		sendMessage(callee.Conn, Message{Type: "error", CallID: msg.CallID, Data: "Cannot accept call, you are not idle"})
+		return
+	}
 
-	// Create the room
 	room := &Room{
 		ID:           msg.CallID,
-		Participants: make(map[*websocket.Conn]bool),
+		Participants: map[*websocket.Conn]bool{caller.Conn: true, callee.Conn: true},
 	}
-	room.Participants[caller.Conn] = true
-	room.Participants[callee.Conn] = true
 	rooms[msg.CallID] = room
 
-	// Update statuses
-	caller.Status = statusInCall
-	callee.Status = statusInCall
-	callee.CallID = msg.CallID // Ensure callee's callID is set
-	callee.isCaller = false    // Callee is not the initiator
+	caller.Status = StatusInCall
+	callee.Status = StatusInCall
+	callee.CallID = msg.CallID
+	callee.IsCaller = false
 
-	log.Printf("Call %s accepted by %s. Room created with caller %s.", msg.CallID, callee.ID, caller.ID)
+	log.Printf("Call %s accepted by %s; room created with caller %s", msg.CallID, callee.ID, caller.ID)
 
-	// Send the answer back to the original caller
-	answerMsg := Message{
+	// Send answer SDP to caller
+	sendMessage(caller.Conn, Message{
 		Type:   "answer",
 		CallID: msg.CallID,
-		Data:   msg.Data, // This is the answer SDP from the callee
-	}
-	if err := caller.Conn.WriteJSON(answerMsg); err != nil {
-		log.Printf("Error sending answer to caller %s for call %s: %v", caller.ID, msg.CallID, err)
-		// Handle error, potentially tear down room
-	}
+		Data:   msg.Data,
+	})
 
-	// Notify other potential callees that the call was taken
+	// Notify other clients that call was taken
 	takenMsg := Message{Type: "call_taken", CallID: msg.CallID}
-	for conn, otherClient := range clients { // Iterate through the main clients map (conn -> ClientInfo)
-		// Check if this otherClient was a potential callee for this call
-		// This is a bit tricky without explicitly tracking who received the "incoming_call"
-		// A simpler approach: send to all clients that are NOT the caller or the current callee,
-		// and let the client-side logic decide if the modal was for this callID.
-		if otherClient.ID != caller.ID && otherClient.ID != callee.ID {
-			if err := conn.WriteJSON(takenMsg); err != nil {
-				log.Printf("Error sending call_taken to %s: %v", otherClient.ID, err)
-			}
+	for conn, c := range clients {
+		if c.ID != caller.ID && c.ID != callee.ID {
+			sendMessage(conn, takenMsg)
 		}
 	}
 }
 
 func handleRejectCall(client *ClientInfo, msg Message) {
 	log.Printf("Client %s rejected call %s. Reason: %s", client.ID, msg.CallID, msg.Reason)
-	// Optional: Notify the original caller that *a* callee rejected.
-	// This can get noisy if many reject. A simple log might be enough.
-	// If you want to notify, find the caller by msg.CallID and send a specific message.
-	// For now, the server just logs this. The client-side modal handles UI.
+	// Could notify caller here if desired
 }
 
 func handleICECandidate(sender *ClientInfo, msg Message) {
-	roomsMu.RLock() // Use RLock as we are only reading the rooms map
+	roomsMu.RLock()
 	room, exists := rooms[msg.CallID]
 	roomsMu.RUnlock()
 
 	if !exists {
-		log.Printf("ICE candidate for non-existent room %s from %s. Ignoring.", msg.CallID, sender.ID)
+		log.Printf("ICE candidate for unknown room %s from %s", msg.CallID, sender.ID)
 		return
 	}
 
-	// Relay ICE candidate to the other participant in the room
 	iceMsg := Message{
 		Type:   "ice-candidate",
 		CallID: msg.CallID,
 		Data:   msg.Data,
 	}
-	forwarded := false
+
 	for participantConn := range room.Participants {
-		if participantConn != sender.Conn { // Don't send back to self
+		if participantConn != sender.Conn {
 			if err := participantConn.WriteJSON(iceMsg); err != nil {
-				log.Printf("Error sending ICE candidate to participant in room %s: %v", msg.CallID, err)
+				log.Printf("Error forwarding ICE candidate in room %s: %v", msg.CallID, err)
 			} else {
-				log.Printf("Relayed ICE candidate from %s for call %s to other participant.", sender.ID, msg.CallID)
-				forwarded = true
+				log.Printf("Forwarded ICE candidate from %s in call %s", sender.ID, msg.CallID)
 			}
 		}
 	}
-	if !forwarded {
-		log.Printf("ICE candidate from %s for call %s had no other participant to relay to.", sender.ID, msg.CallID)
-	}
 }
 
-// handleHangupInternal is called on explicit hangup or unexpected disconnect
-func handleHangupInternal(disconnectedClientConn *websocket.Conn, callID string, reason string) {
+func handleHangupInternal(disconnectedConn *websocket.Conn, callID string, reason string) {
 	if callID == "" {
-		log.Printf("Hangup attempt with no callID for client. Reason: %s", reason)
-		return // No specific call to hang up from
+		log.Printf("Hangup called with empty callID, reason: %s", reason)
+		return
 	}
 
+	// Lock rooms then clients
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
-	clientsMu.Lock() // Also lock clients for status updates
+	clientsMu.Lock()
 	defer clientsMu.Unlock()
 
-	room, roomExists := rooms[callID]
-	if !roomExists {
-		log.Printf("Hangup for non-existent room %s. Reason: %s", callID, reason)
-		// Client might have been 'calling' but no room was formed yet.
-		// Find the client who was 'calling' with this callID and reset their status.
+	room, exists := rooms[callID]
+	if !exists {
+		// No room formed yet, reset caller who initiated call
 		for _, c := range clientsByID {
-			if c.CallID == callID && c.Status == statusCalling {
-				log.Printf("Resetting status for client %s who was calling (call %s never formed).", c.ID, callID)
-				c.Status = statusIdle
-				c.CallID = ""
-				c.isCaller = false
-				// Notify them if it was an explicit hangup request from them
-				if c.Conn == disconnectedClientConn && reason == "hangup_request" {
-					// No one to notify if room wasn't formed
-				}
+			if c.CallID == callID && c.Status == StatusCalling {
+				log.Printf("Resetting caller %s state for unformed call %s", c.ID, callID)
+				resetClientState(c)
 				break
 			}
 		}
 		return
 	}
 
-	log.Printf("Processing hangup for room %s. Disconnected client conn: %p. Reason: %s", callID, disconnectedClientConn, reason)
+	log.Printf("Processing hangup for room %s, reason: %s", callID, reason)
 
-	// Notify other participants in the room
+	// Notify other participants and reset states
 	hangupMsg := Message{Type: "peer_disconnected", CallID: callID, Data: reason}
 	for participantConn := range room.Participants {
-		if participantConn != disconnectedClientConn { // Don't send to the client who initiated the hangup/disconnected
-			log.Printf("Notifying participant in room %s about hangup.", callID)
-			if err := participantConn.WriteJSON(hangupMsg); err != nil {
-				log.Printf("Error sending hangup notification in room %s: %v", callID, err)
-			}
+		if participantConn != disconnectedConn {
+			sendMessage(participantConn, hangupMsg)
 		}
-		// Reset status of all participants in this room
-		if pInfo, ok := clients[participantConn]; ok {
-			log.Printf("Resetting status for participant %s from room %s.", pInfo.ID, callID)
-			pInfo.Status = statusIdle
-			pInfo.CallID = ""
-			pInfo.isCaller = false
+		if clientInfo, ok := clients[participantConn]; ok {
+			resetClientState(clientInfo)
 		}
 	}
 
-	// Delete the room
 	delete(rooms, callID)
-	log.Printf("Room %s deleted.", callID)
+	log.Printf("Deleted room %s after hangup", callID)
 }
 
-
 func main() {
-	// Serve static files for the client (HTML, JS, CSS)
-	// Ensure your client files are in a "./client" directory relative to where the server binary runs.
-	fs := http.FileServer(http.Dir("./client"))
-	http.Handle("/", fs)
-
+	http.Handle("/", http.FileServer(http.Dir("./client")))
 	http.HandleFunc("/ws", handleConnections)
 
-	log.Println("HTTP server started on :8000. WebSocket on /ws")
-	err := http.ListenAndServe(":8000", nil)
-	if err != nil {
-		log.Fatalf("ListenAndServe: %v", err)
+	log.Println("Server started on :8000")
+	if err := http.ListenAndServe(":8000", nil); err != nil {
+		log.Fatalf("ListenAndServe error: %v", err)
 	}
 }
