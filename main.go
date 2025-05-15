@@ -145,40 +145,59 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
 		sendMessage(caller.Conn, Message{Type: "error", CallID: msg.CallID, Data: "Cannot initiate call, already busy."})
 		return
 	}
-	caller.Status = StatusCalling
-	caller.CallID = msg.CallID
-	caller.IsCaller = true
-	clientsMu.Unlock()
 
-	log.Printf("Client %s initiated call %s, notifying idle clients", caller.ID, msg.CallID)
-
-	incomingCall := Message{
-		Type:     "incoming_call",
-		CallID:   msg.CallID,
-		Data:     msg.Data,
-		CallerID: caller.ID,
-	}
-
-	clientsMu.RLock()
-	idleCount := 0
-	for conn, c := range clients {
+	// Try to find an idle callee
+	var callee *ClientInfo
+	for _, c := range clientsByID {
 		if c.ID != caller.ID && c.Status == StatusIdle {
-			if err := conn.WriteJSON(incomingCall); err != nil {
-				log.Printf("Error sending incoming_call to %s: %v", c.ID, err)
-			} else {
-				idleCount++
-			}
+			callee = c
+			break
 		}
 	}
-	clientsMu.RUnlock()
 
-	if idleCount == 0 {
+	if callee == nil {
 		log.Printf("No idle clients for call %s from %s", msg.CallID, caller.ID)
 		sendMessage(caller.Conn, Message{Type: "error", CallID: msg.CallID, Data: "No idle users available."})
-		clientsMu.Lock()
-		resetClientState(caller)
+		caller.Status = StatusIdle
+		caller.CallID = ""
+		caller.IsCaller = false
 		clientsMu.Unlock()
+		return
 	}
+
+	// Set up statuses and room
+	callID := msg.CallID
+	caller.Status = StatusInCall
+	caller.CallID = callID
+	caller.IsCaller = true
+
+	callee.Status = StatusInCall
+	callee.CallID = callID
+	callee.IsCaller = false
+	clientsMu.Unlock()
+
+	roomsMu.Lock()
+	room := &Room{
+		ID:           callID,
+		Participants: map[*websocket.Conn]bool{caller.Conn: true, callee.Conn: true},
+	}
+	rooms[callID] = room
+	roomsMu.Unlock()
+
+	log.Printf("Auto-matched call %s between caller %s and callee %s", callID, caller.ID, callee.ID)
+
+	// Notify both clients that call is connected
+	sendMessage(caller.Conn, Message{
+		Type:   "answer",
+		CallID: callID,
+		Data:   msg.Data, // SDP from caller (if any), or can be empty
+	})
+	sendMessage(callee.Conn, Message{
+		Type:     "incoming_call",
+		CallID:   callID,
+		Data:     msg.Data,
+		CallerID: caller.ID,
+	})
 }
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
