@@ -32,6 +32,7 @@ type Room struct {
 
 var (
 	clients    = make(map[*websocket.Conn]*Client)
+	idleClients = make(map[*websocket.Conn]bool)
 	rooms      = make(map[string]*Room)
 	clientsMu  sync.Mutex
 	roomsMu    sync.Mutex
@@ -47,6 +48,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// Add new client
 	clientsMu.Lock()
 	clients[ws] = &Client{conn: ws}
+	idleClients[ws] = true
 	clientsMu.Unlock()
 
 	defer func() {
@@ -57,6 +59,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			handleHangup(ws, client.callID)
 		}
 		delete(clients, ws)
+		delete(idleClients, ws)
 		clientsMu.Unlock()
 		ws.Close()
 	}()
@@ -90,7 +93,6 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
-	// Create new room if it doesn't exist
 	if _, exists := rooms[msg.CallID]; !exists {
 		rooms[msg.CallID] = &Room{
 			clients: make(map[*websocket.Conn]bool),
@@ -98,14 +100,32 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 		}
 	}
 
-	// Add sender to room and set their callID
 	rooms[msg.CallID].clients[sender] = true
+
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
+	delete(idleClients, sender) // Sender is no longer idle
+
+	// Try to find an available idle client to automatically join
+	for conn := range idleClients {
+		if conn != sender {
+			rooms[msg.CallID].clients[conn] = true
+			clients[conn].callID = msg.CallID
+			delete(idleClients, conn) // Callee is no longer idle
+
+			// Send join notification and offer
+			joinMsg := Message{Type: "call_joined", CallID: msg.CallID}
+			conn.WriteJSON(joinMsg)
+			conn.WriteJSON(msg) // Send offer
+
+			break
+		}
+	}
 	clientsMu.Unlock()
 
 	log.Printf("offer received for call %s", msg.CallID)
 }
+
 
 func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
