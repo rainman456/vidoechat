@@ -290,15 +290,13 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
     clientsMu.Lock()
     defer clientsMu.Unlock()
 
-    // Check if caller is already in a call
     if caller.Status != StatusIdle {
         sendMessage(caller.Conn, Message{Type: "error", Data: "Already in a call"})
         return
     }
 
-    log.Printf("Client %s is initiating a call", caller.ID)
+    log.Printf("Client %s is initiating a call with offer: %s", caller.ID, msg.Data)
 
-    // Find an available callee
     var callee *ClientInfo
     for _, c := range clientsByID {
         if c.ID != caller.ID && c.Status == StatusIdle {
@@ -312,7 +310,6 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
         return
     }
 
-    // Verify callee is still idle (could have changed since we found them)
     if callee.Status != StatusIdle {
         sendMessage(caller.Conn, Message{Type: "error", Data: "Peer is no longer available"})
         return
@@ -323,7 +320,16 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
         callID = uuid.New().String()
     }
 
-    // Update both caller and callee statuses atomically
+    // Create room immediately with just the caller
+    roomsMu.Lock()
+    rooms[callID] = &Room{
+        ID:           callID,
+        Participants: map[*websocket.Conn]bool{caller.Conn: true},
+        CallerConn:   caller.Conn,
+    }
+    roomsMu.Unlock()
+
+    // Update states
     caller.Status = StatusCalling
     caller.CallID = callID
     caller.IsCaller = true
@@ -332,8 +338,9 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
     callee.CallID = callID
     callee.IsCaller = false
 
+    // Forward the offer directly to callee
     sendMessage(callee.Conn, Message{
-        Type:     "incoming_call",
+        Type:     "offer",  // Changed from "incoming_call" to "offer"
         CallID:   callID,
         Data:     msg.Data,
         CallerID: caller.ID,
@@ -356,88 +363,74 @@ func handlePresenceUpdate(client *ClientInfo, msg Message) {
 }
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
-	clientsMu.RLock()
-	var caller *ClientInfo
-	for _, c := range clientsByID {
-		if c.CallID == msg.CallID && c.IsCaller && c.Status == StatusCalling {
-			caller = c
-			break
-		}
-	}
-	clientsMu.RUnlock()
+    clientsMu.RLock()
+    caller := clientsByID[msg.CallerID]  // Assuming callerID is sent in accept_call
+    clientsMu.RUnlock()
 
-	if caller == nil {
-		sendMessage(callee.Conn, Message{Type: "error", Data: "Caller not found or unavailable"})
-		resetClientState(callee)
-		broadcastPeerList()
-		return
-	}
+    if caller == nil {
+        sendMessage(callee.Conn, Message{Type: "error", Data: "Caller not found"})
+        resetClientState(callee)
+        return
+    }
 
-	room := &Room{
-		ID:           msg.CallID,
-		Participants: map[*websocket.Conn]bool{caller.Conn: true, callee.Conn: true},
-		CallerConn:   caller.Conn,
-		CalleeConn:   callee.Conn,
-	}
+    // Complete the room setup
+    roomsMu.Lock()
+    if room, exists := rooms[msg.CallID]; exists {
+        room.Participants[callee.Conn] = true
+        room.CalleeConn = callee.Conn
+    } else {
+        rooms[msg.CallID] = &Room{
+            ID:           msg.CallID,
+            Participants: map[*websocket.Conn]bool{caller.Conn: true, callee.Conn: true},
+            CallerConn:   caller.Conn,
+            CalleeConn:   callee.Conn,
+        }
+    }
+    roomsMu.Unlock()
 
-	roomsMu.Lock()
-	rooms[msg.CallID] = room
-	roomsMu.Unlock()
+    clientsMu.Lock()
+    caller.Status = StatusInCall
+    callee.Status = StatusInCall
+    clientsMu.Unlock()
 
-	clientsMu.Lock()
-	caller.Status = StatusInCall
-	callee.Status = StatusInCall
-	clientsMu.Unlock()
+    // Forward the answer to caller
+    sendMessage(caller.Conn, Message{
+        Type:   "answer",
+        CallID: msg.CallID,
+        Data:   msg.Data,
+    })
 
-	sendMessage(caller.Conn, Message{
-		Type:   "answer",
-		CallID: msg.CallID,
-		Data:   msg.Data,
-	})
-
-	broadcastPeerList()
+    broadcastPeerList()
 }
 
-
 func handleOffer(sender *ClientInfo, msg Message) {
-	if sender == nil {
-		log.Printf("handleOffer: sender is nil")
-		return
-	}
+    roomsMu.RLock()
+    room, exists := rooms[msg.CallID]
+    roomsMu.RUnlock()
 
-	if sender.CallID != msg.CallID {
-		log.Printf("handleOffer: callID mismatch. sender: %s, msg: %s", sender.CallID, msg.CallID)
-		return
-	}
+    if !exists {
+        log.Printf("No room found for call %s", msg.CallID)
+        return
+    }
 
-	roomsMu.RLock()
-	room, exists := rooms[msg.CallID]
-	roomsMu.RUnlock()
-	if !exists {
-		log.Printf("handleOffer: no room with callID %s", msg.CallID)
-		return
-	}
+    var recipient *websocket.Conn
+    if sender.Conn == room.CallerConn {
+        recipient = room.CalleeConn
+    } else {
+        recipient = room.CallerConn
+    }
 
-	var recipient *websocket.Conn
-	if room.CallerConn == sender.Conn {
-		recipient = room.CalleeConn
-	} else if room.CalleeConn == sender.Conn {
-		recipient = room.CallerConn
-	} else {
-		log.Printf("handleOffer: sender not part of room %s", msg.CallID)
-		return
-	}
+    if recipient == nil {
+        log.Printf("No recipient found for call %s", msg.CallID)
+        return
+    }
 
-	if recipient == nil {
-		log.Printf("handleOffer: recipient connection nil for call %s", msg.CallID)
-		return
-	}
-
-	sendMessage(recipient, Message{
-		Type:   "offer",
-		CallID: msg.CallID,
-		Data:   msg.Data,
-	})
+    log.Printf("Forwarding offer for call %s", msg.CallID)
+    sendMessage(recipient, Message{
+        Type:   "offer",
+        CallID: msg.CallID,
+        Data:   msg.Data,
+    })
 }
 
 
