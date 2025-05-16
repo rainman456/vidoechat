@@ -69,6 +69,8 @@
      console.error("Error accessing media devices.", e);
      alert("Error accessing media devices: " + e.message);
    }
+   connectSocket(); 
+
  };
 
  function connectSocket() {
