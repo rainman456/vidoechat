@@ -298,7 +298,7 @@ function hangup() {
 }
 
 // Incoming Call Handling
-function handleIncomingCall(msg) {
+async function handleIncomingCall(msg) {
     if (isCaller || currentCallId) {
         socket.send(JSON.stringify({
             type: "reject_call",
@@ -314,6 +314,7 @@ function handleIncomingCall(msg) {
     pc = await createPeerConnection();
     await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
 }
+
 
 function showIncomingCallModal(callerId) {
     incomingModal.style.display = 'flex';
