@@ -27,9 +27,88 @@ let isCaller = false;
 let pendingCandidates = [];
 let keepaliveInterval = null;
 let peerList = [];
+const peerListElement = document.createElement('div'); // Create a container for peer list
+
 
 // Initialize UI
-updateUIState('init');
+function initializeUI() {
+    // Create and style the peer list container
+    peerListElement.id = 'peerList';
+    peerListElement.style.margin = '10px 0';
+    peerListElement.style.padding = '10px';
+    peerListElement.style.border = '1px solid #ccc';
+    peerListElement.style.borderRadius = '5px';
+    document.body.insertBefore(peerListElement, document.querySelector('h2:nth-of-type(2)')); // Insert before "2. Create a new Call"
+    
+    updateUIState('init');
+}
+function updatePeerListUI() {
+    peerListElement.innerHTML = '<h3>Available Peers</h3>';
+    
+    if (peerList.length === 0) {
+        peerListElement.innerHTML += '<p>No other peers available</p>';
+        return;
+    }
+    
+    const list = document.createElement('ul');
+    peerList.forEach(peer => {
+        const item = document.createElement('li');
+        item.textContent = `${peer.id} (${peer.status})`;
+        list.appendChild(item);
+    });
+    peerListElement.appendChild(list);
+}
+
+// Add this function to handle peer status updates
+function updatePeerStatus(peerId, status) {
+    const peer = peerList.find(p => p.id === peerId);
+    if (peer) {
+        peer.status = status;
+    } else {
+        peerList.push({ id: peerId, status });
+    }
+    updatePeerListUI();
+}
+
+// Add this function to handle incoming call answers
+function handleAnswer(msg) {
+    if (!isCaller || !pc) return;
+    
+    pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)))
+        .then(() => {
+            console.log("Remote description set with answer");
+            // Process any pending ICE candidates
+            while (pendingCandidates.length > 0) {
+                const candidate = pendingCandidates.shift();
+                pc.addIceCandidate(candidate)
+                    .catch(e => console.error("Error adding ICE candidate:", e));
+            }
+            updateUIState('in_call');
+        })
+        .catch(e => {
+            console.error("Error setting remote description:", e);
+            resetCallState();
+        });
+}
+
+// Add this function to handle ICE candidates
+function handleICECandidate(msg) {
+    if (!pc || !currentCallId || msg.callId !== currentCallId) return;
+    
+    const candidate = new RTCIceCandidate(JSON.parse(msg.data));
+    if (pc.remoteDescription) {
+        pc.addIceCandidate(candidate)
+            .catch(e => console.error("Error adding ICE candidate:", e));
+    } else {
+        pendingCandidates.push(candidate);
+    }
+}
+
+// Modify your initialization to use initializeUI() instead of updateUIState('init')
+// Replace:
+// updateUIState('init');
+// With:
+initializeUI();
 
 // WebSocket connection with presence management
 function connectSocket() {
