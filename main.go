@@ -72,33 +72,46 @@ func sendMessage(conn *websocket.Conn, msg Message) {
 	if conn == nil {
 		return
 	}
-	clientsMu.RLock()
-	defer clientsMu.RUnlock()
-	if _, ok := clients[conn]; !ok {
-		return
-	}
+
+	// Avoid blocking indefinitely on slow/stuck connections
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(msg); err != nil {
 		log.Printf("Error sending message: %v", err)
 	}
 }
 
+
 func broadcastPeerList() {
 	clientsMu.RLock()
-	defer clientsMu.RUnlock()
-
-	peers := make([]Peer, 0)
+	peers := make([]Peer, 0, len(clientsByID))
 	for _, c := range clientsByID {
 		peers = append(peers, Peer{
 			ID:     c.ID,
 			Status: c.Status,
 		})
 	}
-
+	conns := make([]*websocket.Conn, 0, len(clients))
 	for conn := range clients {
-		sendMessage(conn, Message{
-			Type:  "peer_list",
-			Peers: peers,
-		})
+		conns = append(conns, conn)
+	}
+	clientsMu.RUnlock()
+
+	msg := Message{
+		Type:  "peer_list",
+		Peers: peers,
+	}
+
+	log.Printf("Broadcasting %d peers", len(peers))
+	for _, p := range peers {
+		log.Printf("Peer: %s - %s", p.ID, p.Status)
+	}
+
+	for _, conn := range conns {
+		go func(c *websocket.Conn) {
+			if err := c.WriteJSON(msg); err != nil {
+				log.Printf("Failed to write peer_list to conn: %v", err)
+			}
+		}(conn)
 	}
 }
 
@@ -311,12 +324,11 @@ func handlePresenceUpdate(client *ClientInfo, msg Message) {
 	}
 
 	clientsMu.Lock()
-	defer clientsMu.Unlock()
-
 	client.Status = msg.Status
 	client.LastSeen = time.Now()
+	clientsMu.Unlock()
 
-	broadcastPeerList()
+	broadcastPeerList() // moved out of lock scope
 }
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
