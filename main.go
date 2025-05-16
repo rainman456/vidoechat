@@ -174,18 +174,17 @@ func handleClient(client *ClientInfo) {
 
 func handleRegister(client *ClientInfo, msg Message) {
 	clientsMu.Lock()
-	defer clientsMu.Unlock()
 
-	// Client ID is already set in handleConnections, we ensure it's known to client
 	client.Status = StatusIdle
+	clientsMu.Unlock() // 🔓 UNLOCK before calling broadcast
 
-	// Send confirmation back
+	// Send confirmation
 	sendMessage(client.Conn, Message{
 		Type:   "register_success",
-		PeerID: client.ID, // use field already available
+		PeerID: client.ID,
 	})
 
-	broadcastPeerList()
+	broadcastPeerList() // ✅ now it won't deadlock
 }
 
 
@@ -199,6 +198,8 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
 	}
 
 	var callee *ClientInfo
+	log.Printf("Client %s is initiating a call", caller.ID)
+
 	for _, c := range clientsByID {
 		if c.ID != caller.ID && c.Status == StatusIdle {
 			callee = c
