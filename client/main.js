@@ -183,43 +183,31 @@ async function createPeerConnection() {
 }
 
 async function startCall() {
-    if (!localStream) {
-        alert("Start webcam first");
-        return;
-    }
+    if (!localStream) return alert("Start webcam first");
+    if (currentCallId) return alert("Already in a call");
     
-    // Prevent multiple calls
-    if (currentCallId || isCaller) {
-        alert("You're already in a call");
-        return;
-    }
-
-    // Ensure WebSocket is connected
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-        alert("Not connected to server");
-        return;
-    }
+    isCaller = true;
+    currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
+    updateUIState('calling');
+    sendPresenceUpdate();
 
     try {
-        isCaller = true;
-        currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
-        updateUIState('calling');
-        sendPresenceUpdate();
-
         pc = await createPeerConnection();
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
         // Wait for ICE gathering to complete
-        const offerWithCandidates = await new Promise((resolve) => {
+        const offerWithCandidates = await new Promise(resolve => {
             if (pc.iceGatheringState === 'complete') {
                 resolve(pc.localDescription);
             } else {
-                pc.onicegatheringstatechange = () => {
+                const checkState = () => {
                     if (pc.iceGatheringState === 'complete') {
+                        pc.removeEventListener('icegatheringstatechange', checkState);
                         resolve(pc.localDescription);
                     }
                 };
+                pc.addEventListener('icegatheringstatechange', checkState);
             }
         });
 
@@ -231,7 +219,6 @@ async function startCall() {
     } catch (err) {
         console.error("Call setup failed:", err);
         resetCallState();
-        alert("Call failed to start");
     }
 }
 
@@ -261,7 +248,6 @@ function hangup() {
 }
 
 async function handleIncomingCall(msg) {
-    // Check if already in a call
     if (currentCallId) {
         socket.send(JSON.stringify({ 
             type: "reject_call", 
@@ -271,17 +257,12 @@ async function handleIncomingCall(msg) {
         return;
     }
 
+    currentCallId = msg.callId;
+    isCaller = false;
+    
     try {
-        currentCallId = msg.callId;
-        isCaller = false;
-        showIncomingCallModal(msg.callerId);
-
         if (!localStream) {
-            // Optionally get media here if not already done
-            localStream = await navigator.mediaDevices.getUserMedia({ 
-                video: true, 
-                audio: true 
-            });
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             webcamVideo.srcObject = localStream;
             webcamVideo.muted = true;
         }
@@ -289,11 +270,9 @@ async function handleIncomingCall(msg) {
         pc = await createPeerConnection();
         await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
         
-        // Add any candidates that arrived before the offer
-        pendingCandidates.forEach(candidate => {
-            pc.addIceCandidate(candidate).catch(console.error);
-        });
-        pendingCandidates = [];
+        // Show incoming call UI
+        showIncomingCallModal(msg.callerId);
+        updateUIState('ringing');
     } catch (err) {
         console.error("Error handling incoming call:", err);
         socket.send(JSON.stringify({ 
