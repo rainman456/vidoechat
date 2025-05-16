@@ -69,27 +69,27 @@ var (
 )
 
 func sendMessage(conn *websocket.Conn, msg Message) {
-	if conn == nil {
-		return
-	}
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := conn.WriteJSON(msg); err != nil {
-		log.Printf("Error sending message: %v", err)
+	 if err := conn.WriteJSON(msg); err != nil {
+        log.Printf("Error sending message: %v", err)
+        var clientIDForLog string // For logging after removal
+        clientsMu.Lock()
+        if client, exists := clients[conn]; exists {
+            clientIDForLog = client.ID // Get ID for logging before deletion
+            conn.Close()
+            delete(clientsByID, client.ID)
+            delete(clients, conn)
+            log.Printf("Removed client %s due to write failure", clientIDForLog) // Use stored ID
+            // clientsMu.Unlock() // Moved down
+            // broadcastPeerList() // MOVED
+        } // else: client might have been removed by another goroutine, which is fine.
+        clientsMu.Unlock() // Correct place to unlock
 
-		// Optional: remove dead clients
-		clientsMu.Lock()
-		if client, exists := clients[conn]; exists {
-			conn.Close()
-			delete(clientsByID, client.ID)
-			delete(clients, conn)
-			log.Printf("Removed client %s due to write failure", client.ID)
-		}
-		clientsMu.Unlock()
-
-		broadcastPeerList()
-	}
+        if clientIDForLog != "" { // Only broadcast if a client was actually removed by this instance
+            broadcastPeerList() // Call AFTER releasing the lock
+        }
+        return // Ensure function returns after handling error
+    }
 }
-
 
 func broadcastPeerList() {
 	clientsMu.RLock()
@@ -148,20 +148,34 @@ func checkClientTimeouts() {
 	defer ticker.Stop()
 
 	for {
-		<-ticker.C
-		clientsMu.Lock()
-		now := time.Now()
-		for conn, client := range clients {
-			if now.Sub(client.LastSeen) > 2*time.Minute {
-				log.Printf("Client %s timed out", client.ID)
-				conn.Close()
-				delete(clientsByID, client.ID)
-				delete(clients, conn)
-			}
-		}
-		clientsMu.Unlock()
-	}
-}
+        <-ticker.C
+        clientsToTimeout := make(map[*websocket.Conn]*ClientInfo) // Collect clients to remove
+
+        clientsMu.RLock() // Use RLock for initial scan
+        now := time.Now()
+        for conn, client := range clients {
+            if now.Sub(client.LastSeen) > 2*time.Minute {
+                clientsToTimeout[conn] = client
+            }
+        }
+        clientsMu.RUnlock()
+
+        if len(clientsToTimeout) > 0 {
+            clientsMu.Lock()
+            for conn, client := range clientsToTimeout {
+                // Double-check if client still exists and is the same one,
+                // as it might have been removed/reconnected between RUnlock and Lock.
+                if currentClient, exists := clients[conn]; exists && currentClient.ID == client.ID {
+                    log.Printf("Client %s timed out", client.ID)
+                    conn.Close()
+                    delete(clientsByID, client.ID)
+                    delete(clients, conn)
+                }
+            }
+            clientsMu.Unlock()
+            broadcastPeerList() // Call AFTER releasing lock and if changes were made
+        }
+    }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
@@ -207,25 +221,60 @@ func handleClient(client *ClientInfo) {
 	go startPingSender(client)
 
 	defer func() {
-	log.Printf("Client %s disconnecting...", client.ID)
+        log.Printf("Client %s disconnecting...", client.ID)
 
-	clientsMu.RLock()
-	c := clients[client.Conn]
-	clientsMu.RUnlock()
+        // Step 1: Determine if a hangup is needed based on client's last known state from maps.
+        var callIDToHangup string
+        var originalConn = client.Conn // Keep original conn for closing at the very end.
 
-	if c.Status == StatusInCall || c.Status == StatusCalling || c.Status == StatusRinging {
-		handleHangup(client.Conn, c.CallID, "disconnected")
-	}
+        clientsMu.RLock()
+        // Fetch the most current state of this client from the global map
+        clientStateFromMap, stillConnected := clients[originalConn]
+        if stillConnected {
+            // Use the state from the map, not the 'client' parameter which might be stale
+            if clientStateFromMap.Status == StatusInCall || clientStateFromMap.Status == StatusCalling || clientStateFromMap.Status == StatusRinging {
+                callIDToHangup = clientStateFromMap.CallID
+            }
+        }
+        clientsMu.RUnlock()
 
-	clientsMu.Lock()
-	delete(clientsByID, c.ID)
-	delete(clients, client.Conn)
-	clientsMu.Unlock()
+        // Step 2: Perform hangup if necessary (this function will handle its own locks)
+        if callIDToHangup != "" {
+            log.Printf("Client %s was in call %s. Handling hangup.", client.ID, callIDToHangup)
+            handleHangup(originalConn, callIDToHangup, "disconnected")
+        }
 
-	client.Conn.Close()
-	log.Printf("Broadcasting updated peer list after client %s disconnect", client.ID)
-	broadcastPeerList()
-}()
+        // Step 3: Remove client from global maps
+        clientsMu.Lock()
+        // Check again before deleting, as handleHangup might have already done it
+        // or another process (timeout).
+        if c, exists := clients[originalConn]; exists {
+             // Only delete if it's the same client instance ID to prevent races
+            if c.ID == client.ID {
+                delete(clientsByID, client.ID) // Use the original client.ID from the parameter
+                delete(clients, originalConn)
+                log.Printf("Client %s removed from maps.", client.ID)
+            } else {
+                log.Printf("Client %s (conn %p) was replaced by %s. Not removing via original client's defer.", client.ID, originalConn, c.ID)
+            }
+        } else {
+            log.Printf("Client %s (conn %p) already removed from 'clients' map.", client.ID, originalConn)
+            // It's possible it's still in clientsByID if removal was partial elsewhere, ensure cleanup.
+             if _, idExists := clientsByID[client.ID]; idExists {
+                 delete(clientsByID, client.ID)
+                 log.Printf("Client %s removed from 'clientsByID' map as a fallback.", client.ID)
+             }
+        }
+        clientsMu.Unlock()
+
+        // Step 4: Close the connection
+        if originalConn != nil {
+            originalConn.Close()
+        }
+
+        log.Printf("Broadcasting updated peer list after client %s disconnect.", client.ID)
+        broadcastPeerList() // This function correctly handles its own locking
+    }()
 
 
 	for {
@@ -287,16 +336,23 @@ func handleRegister(client *ClientInfo, msg Message) {
 }
 
 func handleInitiateCall(caller *ClientInfo, msg Message) {
-    clientsMu.Lock()
-    defer clientsMu.Unlock()
+    //clientsMu.Lock()
+    //defer clientsMu.Unlock()
 
     // Validate caller state
+   var messagesToSend []struct {
+        conn *websocket.Conn
+        msg  Message
+    }
+    var calleeIDForBroadcast string
+    var callIDForLog string
+    var success bool = false
+
+    clientsMu.Lock()
+    // Validate caller state
     if caller.Status != StatusIdle {
-        sendMessage(caller.Conn, Message{
-            Type: "error", 
-            Data: "Already in a call",
-            CallID: msg.CallID, // Include callID in error response
-        })
+        clientsMu.Unlock() // Release lock before sending
+        sendMessage(caller.Conn, Message{Type: "error", Data: "Already in a call", CallID: msg.CallID})
         return
     }
 
@@ -310,11 +366,9 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
         return
     }
 
-    log.Printf("Client %s initiating call with ID %s", caller.ID, msg.CallID)
-
-    // Find available callee
+    llog.Printf("Client %s initiating call with ID %s", caller.ID, msg.CallID)
     var callee *ClientInfo
-    for _, c := range clientsByID {
+    for _, c := range clientsByID { // Iterate over clientsByID as it's ID-indexed
         if c.ID != caller.ID && c.Status == StatusIdle {
             callee = c
             break
@@ -322,32 +376,40 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
     }
 
     if callee == nil {
-        sendMessage(caller.Conn, Message{
-            Type: "error",
-            Data: "No available peers",
-            CallID: msg.CallID,
-        })
+        clientsMu.Unlock() // Release lock before sending
+        sendMessage(caller.Conn, Message{Type: "error", Data: "No available peers", CallID: msg.CallID})
         return
     }
 
-    // Generate call ID if not provided
     callID := msg.CallID
     if callID == "" {
         callID = uuid.New().String()
         log.Printf("Generated new call ID: %s", callID)
     }
+    callIDForLog = callID // For logging after unlock
 
-    // Update caller state FIRST
+    // Update caller state
     caller.Status = StatusCalling
-    caller.CallID = callID  // This was missing in your original code
+    caller.CallID = callID
     caller.IsCaller = true
 
     // Update callee state
     callee.Status = StatusRinging
-    callee.CallID = callID  // Critical for ICE candidate routing
+    callee.CallID = callID
     callee.IsCaller = false
+    calleeIDForBroadcast = callee.ID // For logging & message prep
 
-    // Create room with both participants
+    // Prepare messages BEFORE room lock, using data already protected by clientsMu
+    messagesToSend = append(messagesToSend, struct{conn *websocket.Conn; msg Message}{
+        conn: callee.Conn,
+        msg: Message{Type: "offer", CallID: callID, Data: msg.Data, CallerID: caller.ID, PeerID: caller.ID},
+    })
+    messagesToSend = append(messagesToSend, struct{conn *websocket.Conn; msg Message}{
+        conn: caller.Conn,
+        msg: Message{Type: "call_initiated", CallID: callID, PeerID: callee.ID},
+    })
+
+    // Create room
     roomsMu.Lock()
     rooms[callID] = &Room{
         ID:           callID,
@@ -356,26 +418,17 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
         CalleeConn:   callee.Conn,
     }
     roomsMu.Unlock()
+    success = true
+    clientsMu.Unlock() // ***** RELEASE clientsMu LOCK *****
 
-    // Send offer to callee with all required fields
-    sendMessage(callee.Conn, Message{
-        Type:     "offer",
-        CallID:   callID,
-        Data:     msg.Data,
-        CallerID: caller.ID,
-        PeerID:   caller.ID, // Helps identify who is calling
-    })
-
-    // Notify caller that call was initiated
-    sendMessage(caller.Conn, Message{
-        Type:   "call_initiated",
-        CallID: callID,
-        PeerID: callee.ID,
-    })
-
-    broadcastPeerList()
-    log.Printf("Call %s initiated between %s and %s", callID, caller.ID, callee.ID)
-}
+    // Send messages
+    if success {
+        for _, m := range messagesToSend {
+            go sendMessage(m.conn, m.msg) // Send in goroutine to avoid blocking current handler
+        }
+        broadcastPeerList()
+        log.Printf("Call %s initiated between %s and %s", callIDForLog, caller.ID, calleeIDForBroadcast)
+    }
 
 func handlePresenceUpdate(client *ClientInfo, msg Message) {
 	if msg.Status == "" {
@@ -391,45 +444,63 @@ func handlePresenceUpdate(client *ClientInfo, msg Message) {
 }
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
-    clientsMu.RLock()
-    caller := clientsByID[msg.CallerID]  // Assuming callerID is sent in accept_call
-    clientsMu.RUnlock()
+   var callerConnForMessage *websocket.Conn
+    var callIDForLog = msg.CallID
+    var success bool = false
 
-    if caller == nil {
-        sendMessage(callee.Conn, Message{Type: "error", Data: "Caller not found"})
-        resetClientState(callee)
+    clientsMu.Lock() // Take full lock initially for state checks and updates
+
+    caller, callerExists := clientsByID[msg.CallerID]
+    if !callerExists || caller == nil {
+        clientsMu.Unlock()
+        sendMessage(callee.Conn, Message{Type: "error", Data: "Caller not found", CallID: msg.CallID})
+        // resetClientState(callee) // This would require clientsMu.Lock again, handle carefully or ensure callee is reset
         return
     }
+
+    // Verify caller is in the expected state for this call
+    if caller.CallID != msg.CallID || caller.Status != StatusCalling {
+        clientsMu.Unlock()
+        sendMessage(callee.Conn, Message{Type: "error", Data: "Call not found or caller not in 'calling' state.", CallID: msg.CallID})
+        // resetClientState(callee)
+        return
+    }
+    callerConnForMessage = caller.Conn // Store for sending message later
 
     // Complete the room setup
     roomsMu.Lock()
     if room, exists := rooms[msg.CallID]; exists {
         room.Participants[callee.Conn] = true
-        room.CalleeConn = callee.Conn
+        room.CalleeConn = callee.Conn // Already set in initiate, but confirm
     } else {
-        rooms[msg.CallID] = &Room{
-            ID:           msg.CallID,
-            Participants: map[*websocket.Conn]bool{caller.Conn: true, callee.Conn: true},
-            CallerConn:   caller.Conn,
-            CalleeConn:   callee.Conn,
-        }
+        // This is an issue: room doesn't exist for an accepted call.
+        roomsMu.Unlock()
+        clientsMu.Unlock()
+        sendMessage(callee.Conn, Message{Type: "error", Data: "Room for call not found.", CallID: msg.CallID})
+        sendMessage(caller.Conn, Message{Type: "error", Data: "Room for call disappeared before acceptance.", CallID: msg.CallID})
+        // May need to reset both client states here.
+        return
     }
     roomsMu.Unlock()
 
-    clientsMu.Lock()
     caller.Status = StatusInCall
     callee.Status = StatusInCall
-    clientsMu.Unlock()
+    // callee.CallID was already set
 
-    // Forward the answer to caller
-    sendMessage(caller.Conn, Message{
-        Type:   "answer",
-        CallID: msg.CallID,
-        Data:   msg.Data,
-    })
+    success = true
+    clientsMu.Unlock() // ***** RELEASE clientsMu LOCK *****
 
-    broadcastPeerList()
-}
+    if success {
+        // Forward the answer to caller
+        sendMessage(callerConnForMessage, Message{
+            Type:   "answer",
+            CallID: msg.CallID,
+            Data:   msg.Data,
+            PeerID: callee.ID, // Identify who sent the answer
+        })
+        broadcastPeerList()
+        log.Printf("Call %s accepted by %s, now in-call with %s", callIDForLog, callee.ID, msg.CallerID)
+    }
 
 func handleOffer(sender *ClientInfo, msg Message) {
     roomsMu.RLock()
@@ -465,107 +536,135 @@ func handleOffer(sender *ClientInfo, msg Message) {
 
 
 func handleRejectCall(callee *ClientInfo, msg Message) {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
+	 var callerToNotify *ClientInfo
+    var messageToSendToCaller Message
+    var shouldNotifyCaller bool = false
+    var callIDForLog = msg.CallID
 
-	var caller *ClientInfo
-	for _, c := range clientsByID {
-		if c.CallID == msg.CallID && c.IsCaller {
-			caller = c
-			break
-		}
-	}
+    clientsMu.Lock()
+    for _, c := range clientsByID { // Iterate clientsByID
+        if c.CallID == msg.CallID && c.IsCaller {
+            // Ensure caller is in a state that can be rejected (e.g. StatusCalling)
+            if c.Status == StatusCalling {
+                 callerToNotify = c
+                 shouldNotifyCaller = true
+                 messageToSendToCaller = Message{Type: "call_rejected", CallID: msg.CallID, Reason: msg.Reason, PeerID: callee.ID}
+                 resetClientState(callerToNotify)
+            } else {
+                log.Printf("RejectCall: Found caller %s for call %s, but status is %s (not 'calling').", c.ID, msg.CallID, c.Status)
+            }
+            break
+        }
+    }
+    resetClientState(callee)
+    clientsMu.Unlock() // ***** RELEASE clientsMu LOCK *****
 
-	if caller != nil {
-		sendMessage(caller.Conn, Message{
-			Type:   "call_rejected",
-			CallID: msg.CallID,
-			Reason: msg.Reason,
-		})
-		resetClientState(caller)
-	}
+    // Send notification outside of lock
+    if shouldNotifyCaller && callerToNotify != nil {
+        sendMessage(callerToNotify.Conn, messageToSendToCaller)
+    }
 
-	resetClientState(callee)
-	roomsMu.Lock()
-	delete(rooms, msg.CallID)
-	roomsMu.Unlock()
-	broadcastPeerList()
+    roomsMu.Lock()
+    delete(rooms, msg.CallID)
+    roomsMu.Unlock()
+
+    broadcastPeerList()
+    log.Printf("Call %s rejected by %s.", callIDForLog, callee.ID)
 }
 
 func handleICECandidate(sender *ClientInfo, msg Message) {
-	clientsMu.RLock()
-	defer clientsMu.RUnlock()
+	//clientsMu.RLock()
+	//defer clientsMu.RUnlock()
 
-	if sender.CallID != msg.CallID {
-		log.Printf("ICE candidate from client %s with mismatched callID: %s (expected %s)", sender.ID, msg.CallID, sender.CallID)
-		return
-	}
+	 if sender.CallID != msg.CallID {
+        log.Printf("ICE candidate from client %s with mismatched callID: %s (expected %s)", sender.ID, msg.CallID, sender.CallID)
+        return
+    }
 
-	roomsMu.RLock()
-	room, exists := rooms[msg.CallID]
-	roomsMu.RUnlock()
+    roomsMu.RLock() // Lock for reading room information
+    room, exists := rooms[msg.CallID]
+    if !exists {
+        roomsMu.RUnlock()
+        log.Printf("ICE candidate for non-existing call: %s", msg.CallID)
+        return
+    }
 
-	if !exists {
-		log.Printf("ICE candidate for non-existing call: %s", msg.CallID)
-		return
-	}
+    var recipient *websocket.Conn
+    if room.CallerConn == sender.Conn {
+        recipient = room.CalleeConn
+    } else if room.CalleeConn == sender.Conn {
+        recipient = room.CallerConn
+    } else {
+        roomsMu.RUnlock()
+        log.Printf("ICE candidate sender %s not part of call room %s", sender.ID, msg.CallID)
+        return
+    }
+    roomsMu.RUnlock() // ***** RELEASE roomsMu LOCK *****
 
-	var recipient *websocket.Conn
-	if room.CallerConn == sender.Conn {
-		recipient = room.CalleeConn
-	} else if room.CalleeConn == sender.Conn {
-		recipient = room.CallerConn
-	} else {
-		log.Printf("ICE candidate sender %s not part of call room %s", sender.ID, msg.CallID)
-		return
-	}
+    if recipient == nil {
+        log.Printf("ICE candidate recipient connection is nil for call %s (sender %s may have disconnected other party)", msg.CallID, sender.ID)
+        return
+    }
 
-	if recipient == nil {
-		log.Printf("ICE candidate recipient connection is nil for call %s", msg.CallID)
-		return
-	}
-
-	sendMessage(recipient, Message{
-		Type:   "ice-candidate",
-		CallID: msg.CallID,
-		Data:   msg.Data,
-	})
+    sendMessage(recipient, Message{
+        Type:   "ice-candidate",
+        CallID: msg.CallID,
+        Data:   msg.Data,
+        PeerID: sender.ID, // Identify who this candidate is from
+    })
 }
 
 
 func handleHangup(conn *websocket.Conn, callID, reason string) {
-	var otherConn *websocket.Conn
+	 var otherConn *websocket.Conn
+    var clientWhoHungUpID string
+    var otherClientID string
 
-	roomsMu.Lock()
-	room, exists := rooms[callID]
-	if exists {
-		if room.CallerConn == conn {
-			otherConn = room.CalleeConn
-		} else {
-			otherConn = room.CallerConn
-		}
-		delete(rooms, callID)
-	}
-	roomsMu.Unlock()
+    roomsMu.Lock()
+    room, exists := rooms[callID]
+    if exists {
+        if room.CallerConn == conn {
+            otherConn = room.CalleeConn
+        } else if room.CalleeConn == conn { // Added check to ensure 'conn' is part of the room
+            otherConn = room.CallerConn
+        } else {
+             // conn is not part of this room, log and potentially don't delete
+             log.Printf("Hangup from conn %p for callID %s, but conn not in room. Caller: %p, Callee: %p", conn, callID, room.CallerConn, room.CalleeConn)
+        }
+        delete(rooms, callID) // Delete room if it existed and callID matches
+    }
+    roomsMu.Unlock()
 
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
+    var messageForOtherClient Message
+    var shouldSendMessageToOther = false
 
-	if otherConn != nil {
-		log.Printf("Sending peer_disconnected to %s because %s hung up", clients[otherConn].ID, reason)
-		sendMessage(otherConn, Message{
-			Type:   "peer_disconnected",
-			CallID: callID,
-			Reason: reason,
-		})
-		resetClientState(clients[otherConn])
-	}
+    clientsMu.Lock()
+    if c, ok := clients[conn]; ok { // Get ID of client who hung up
+        clientWhoHungUpID = c.ID
+    }
 
-	if client, ok := clients[conn]; ok {
-		resetClientState(client)
-	}
+    if otherConn != nil {
+        if client, exists := clients[otherConn]; exists {
+            otherClientID = client.ID // Store ID for logging
+            messageForOtherClient = Message{Type: "peer_disconnected", CallID: callID, Reason: reason, PeerID: clientWhoHungUpID}
+            shouldSendMessageToOther = true
+            resetClientState(client)
+        }
+    }
 
-	broadcastPeerList()
+    if client, ok := clients[conn]; ok {
+        resetClientState(client)
+    }
+    clientsMu.Unlock() // ***** RELEASE clientsMu LOCK *****
+
+    // Send message after lock is released
+    if shouldSendMessageToOther && otherConn != nil { // Check otherConn again as it's used outside lock
+        log.Printf("Sending peer_disconnected to %s (was %s) because %s hung up", otherClientID, clients[otherConn].ID, reason) // Re-fetch ID for log if needed
+        sendMessage(otherConn, messageForOtherClient)
+    }
+
+    broadcastPeerList()
+    log.Printf("Call %s ended by %s (conn %p). Other party was %s (conn %p). Reason: %s", callID, clientWhoHungUpID, conn, otherClientID, otherConn, reason)
 }
 
 
