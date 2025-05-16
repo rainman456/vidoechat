@@ -42,6 +42,7 @@ type Message struct {
 	Reason   string `json:"reason,omitempty"`
 	Peers    []Peer `json:"peers,omitempty"`
 	PeerID string `json:"peerId,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 type Peer struct {
@@ -166,6 +167,8 @@ func handleClient(client *ClientInfo) {
 			sendMessage(client.Conn, Message{Type: "pong"})
 		case "register":
 			handleRegister(client, msg)
+		case "presence_update":
+		     handlePresenceUpdate(client, msg)
 		default:
 			sendMessage(client.Conn, Message{Type: "error", Data: "Unknown message type"})
 		}
@@ -230,6 +233,21 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
 
 	broadcastPeerList()
 }
+func handlePresenceUpdate(client *ClientInfo, msg Message) {
+    if msg.Data == "" {
+        // If you prefer status in msg.Data, or else add a field in Message for status
+        return
+    }
+
+    clientsMu.Lock()
+    defer clientsMu.Unlock()
+
+    client.Status = msg.Status // Assuming the client sends status as "data" field
+    client.LastSeen = time.Now()
+
+    broadcastPeerList()
+}
+
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
 	roomsMu.Lock()
