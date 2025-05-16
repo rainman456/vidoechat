@@ -161,15 +161,14 @@ async function createPeerConnection() {
     pc = new RTCPeerConnection(servers);
 
     pc.onicecandidate = (event) => {
-        if (event.candidate && currentCallId && socket?.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-                type: "ice-candidate",
-                callId: currentCallId,
-                data: JSON.stringify(event.candidate)
-            }));
-        }
-    };
-
+    if (event.candidate && currentCallId && socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+            type: "ice-candidate",
+            callId: currentCallId,  // Make sure this is set
+            data: JSON.stringify(event.candidate)
+        }));
+    }
+};
     pc.ontrack = (event) => {
         if (!remoteStream) {
             remoteStream = new MediaStream();
@@ -302,15 +301,24 @@ function handleAnswer(msg) {
 }
 
 function handleICECandidate(msg) {
-    if (!pc || msg.callId !== currentCallId) return;
-    const candidate = new RTCIceCandidate(JSON.parse(msg.data));
-    if (pc.remoteDescription) {
-        pc.addIceCandidate(candidate).catch(console.error);
-    } else {
-        pendingCandidates.push(candidate);
+    if (!pc || msg.callId !== currentCallId) {
+        console.log("Ignoring ICE candidate - no PC or callID mismatch");
+        return;
+    }
+    
+    try {
+        const candidate = new RTCIceCandidate(JSON.parse(msg.data));
+        if (pc.remoteDescription) {
+            pc.addIceCandidate(candidate).catch(err => {
+                console.error("Error adding ICE candidate:", err);
+            });
+        } else {
+            pendingCandidates.push(candidate);
+        }
+    } catch (err) {
+        console.error("Error parsing ICE candidate:", err);
     }
 }
-
 function showIncomingCallModal(callerId) {
     incomingModal.style.display = 'flex';
     ringtone.play().catch(console.warn);
