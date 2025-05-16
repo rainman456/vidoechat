@@ -137,19 +137,19 @@
  }
 
 
-     try {
-       if (msg.type === "offer" && !isCaller) {
-         if (!pc) {
-    pc = createPeerConnection();
-  }
-  const offer = JSON.parse(msg.data);
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-         if (!currentCallId && msg.callId) {
-           currentCallId = msg.callId;
-           callInput.value = currentCallId;
-         }
-         const offer = JSON.parse(msg.data);
-         await pc.setRemoteDescription(new RTCSessionDescription(offer));
+       try {
+    if (msg.type === "offer" && !isCaller) {
+      if (!pc || pc.signalingState === 'closed') {
+        pc = createPeerConnection();
+      }
+
+      if (!currentCallId && msg.callId) {
+        currentCallId = msg.callId;
+        callInput.value = currentCallId;
+      }
+
+      const remoteOffer = JSON.parse(msg.data);
+      await pc.setRemoteDescription(new RTCSessionDescription(remoteOffer));
 
          const answer = await pc.createAnswer();
          await pc.setLocalDescription(answer);
