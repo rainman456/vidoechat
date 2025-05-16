@@ -486,6 +486,9 @@ func handleRejectCall(callee *ClientInfo, msg Message) {
 	}
 
 	resetClientState(callee)
+	roomsMu.Lock()
+	delete(rooms, msg.CallID)
+	roomsMu.Unlock()
 	broadcastPeerList()
 }
 
