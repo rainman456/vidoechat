@@ -201,21 +201,26 @@ func handleClient(client *ClientInfo) {
 	go startPingSender(client)
 
 	defer func() {
-		log.Printf("Client %s disconnecting...", client.ID)
-		clientsMu.Lock()
-		if c, ok := clients[client.Conn]; ok {
-			log.Printf("Removing client %s from registry", c.ID)
-			if c.Status == StatusInCall || c.Status == StatusCalling || c.Status == StatusRinging {
-				handleHangup(client.Conn, c.CallID, "disconnected")
-			}
-			delete(clientsByID, c.ID)
-			delete(clients, client.Conn)
-		}
-		clientsMu.Unlock()
-		client.Conn.Close()
-		log.Printf("Broadcasting updated peer list after client %s disconnect", client.ID)
-		broadcastPeerList()
-	}()
+	log.Printf("Client %s disconnecting...", client.ID)
+
+	clientsMu.RLock()
+	c := clients[client.Conn]
+	clientsMu.RUnlock()
+
+	if c.Status == StatusInCall || c.Status == StatusCalling || c.Status == StatusRinging {
+		handleHangup(client.Conn, c.CallID, "disconnected")
+	}
+
+	clientsMu.Lock()
+	delete(clientsByID, c.ID)
+	delete(clients, client.Conn)
+	clientsMu.Unlock()
+
+	client.Conn.Close()
+	log.Printf("Broadcasting updated peer list after client %s disconnect", client.ID)
+	broadcastPeerList()
+}()
+
 
 	for {
 		//client.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -332,21 +337,20 @@ func handlePresenceUpdate(client *ClientInfo, msg Message) {
 }
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
-	roomsMu.Lock()
-	defer roomsMu.Unlock()
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
-
+	clientsMu.RLock()
 	var caller *ClientInfo
 	for _, c := range clientsByID {
-		if c.CallID == msg.CallID && c.IsCaller {
+		if c.CallID == msg.CallID && c.IsCaller && c.Status == StatusCalling {
 			caller = c
 			break
 		}
 	}
+	clientsMu.RUnlock()
 
 	if caller == nil {
-		sendMessage(callee.Conn, Message{Type: "error", Data: "Caller not found"})
+		sendMessage(callee.Conn, Message{Type: "error", Data: "Caller not found or unavailable"})
+		resetClientState(callee)
+		broadcastPeerList()
 		return
 	}
 
@@ -356,10 +360,15 @@ func handleAcceptCall(callee *ClientInfo, msg Message) {
 		CallerConn:   caller.Conn,
 		CalleeConn:   callee.Conn,
 	}
-	rooms[msg.CallID] = room
 
+	roomsMu.Lock()
+	rooms[msg.CallID] = room
+	roomsMu.Unlock()
+
+	clientsMu.Lock()
 	caller.Status = StatusInCall
 	callee.Status = StatusInCall
+	clientsMu.Unlock()
 
 	sendMessage(caller.Conn, Message{
 		Type:   "answer",
@@ -370,27 +379,39 @@ func handleAcceptCall(callee *ClientInfo, msg Message) {
 	broadcastPeerList()
 }
 
+
 func handleOffer(sender *ClientInfo, msg Message) {
-    roomsMu.RLock()
-    room, exists := rooms[msg.CallID]
-    roomsMu.RUnlock()
-    if !exists {
-        return
-    }
+	if sender == nil {
+		log.Printf("handleOffer: sender is nil")
+		return
+	}
+	roomsMu.RLock()
+	room, exists := rooms[msg.CallID]
+	roomsMu.RUnlock()
+	if !exists {
+		log.Printf("handleOffer: room %s not found", msg.CallID)
+		return
+	}
 
-    var recipient *websocket.Conn
-    if room.CallerConn == sender.Conn {
-        recipient = room.CalleeConn
-    } else {
-        recipient = room.CallerConn
-    }
+	var recipient *websocket.Conn
+	if room.CallerConn == sender.Conn {
+		recipient = room.CalleeConn
+	} else {
+		recipient = room.CallerConn
+	}
 
-    sendMessage(recipient, Message{
-        Type:   "offer",
-        CallID: msg.CallID,
-        Data:   msg.Data,
-    })
+	if recipient == nil {
+		log.Printf("handleOffer: recipient connection is nil")
+		return
+	}
+
+	sendMessage(recipient, Message{
+		Type:   "offer",
+		CallID: msg.CallID,
+		Data:   msg.Data,
+	})
 }
+
 
 
 func handleRejectCall(callee *ClientInfo, msg Message) {
@@ -442,46 +463,43 @@ func handleICECandidate(sender *ClientInfo, msg Message) {
 }
 
 func handleHangup(conn *websocket.Conn, callID, reason string) {
-	roomsMu.Lock()
-	defer roomsMu.Unlock()
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
+	var otherConn *websocket.Conn
 
+	roomsMu.Lock()
 	room, exists := rooms[callID]
 	if exists {
-		var otherConn *websocket.Conn
 		if room.CallerConn == conn {
 			otherConn = room.CalleeConn
 		} else {
 			otherConn = room.CallerConn
 		}
-
-		if otherConn != nil {
-			sendMessage(otherConn, Message{
-				Type:   "peer_disconnected",
-				CallID: callID,
-				Reason: reason,
-			})
-			if client, ok := clients[otherConn]; ok {
-				resetClientState(client)
-			}
-		}
-
 		delete(rooms, callID)
 	}
+	roomsMu.Unlock()
 
-	if client, ok := clients[conn]; ok {
-		resetClientState(client)
+	if otherConn != nil {
+		sendMessage(otherConn, Message{
+			Type:   "peer_disconnected",
+			CallID: callID,
+			Reason: reason,
+		})
+		resetClientState(clients[otherConn])
 	}
 
+	resetClientState(clients[conn])
 	broadcastPeerList()
 }
 
+
 func resetClientState(client *ClientInfo) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+
 	client.Status = StatusIdle
 	client.CallID = ""
 	client.IsCaller = false
 }
+
 
 func main() {
 	go checkClientTimeouts()
