@@ -34,7 +34,16 @@ const ringtone = document.getElementById('ringtone');
 const remoteVideo = document.getElementById('remoteVideo');
 
 function initializeUI() {
+    peerListElement.id = 'peerList';
+    peerListElement.style.margin = '10px 0';
+    peerListElement.style.padding = '10px';
+    peerListElement.style.border = '1px solid #ccc';
+    peerListElement.style.borderRadius = '5px';
+
+    // Attach it to the DOM before calling update
     document.body.insertBefore(peerListElement, document.querySelector('h2:nth-of-type(2)'));
+
+    // Now safe to update UI
     updateUIState('init');
 }
 
