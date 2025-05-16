@@ -93,40 +93,37 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
+	// ✅ Create room if it doesn't exist yet
 	if _, exists := rooms[msg.CallID]; !exists {
 		rooms[msg.CallID] = &Room{
 			clients: make(map[*websocket.Conn]bool),
-			offer:   &msg,
 		}
+		log.Printf("Created new room for call %s (via offer)", msg.CallID)
 	}
 
-	rooms[msg.CallID].clients[sender] = true
+	room := rooms[msg.CallID]
+	room.offer = &msg
+	room.clients[sender] = true
 
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
-	delete(idleClients, sender) // Sender is no longer idle
-
-	// Try to find an available idle client to automatically join
-	for conn := range idleClients {
-		if conn != sender {
-			rooms[msg.CallID].clients[conn] = true
-			if client, ok := clients[conn]; ok {
-				client.callID = msg.CallID
-			}
-			delete(idleClients, conn) // Callee is no longer idle
-
-			// Send join notification and offer
-			joinMsg := Message{Type: "call_joined", CallID: msg.CallID}
-			conn.WriteJSON(joinMsg)
-			conn.WriteJSON(msg) // Send offer
-
-			break
-		}
-	}
 	clientsMu.Unlock()
 
-	log.Printf("offer received for call %s", msg.CallID)
+	log.Printf("Stored offer for call %s", msg.CallID)
+
+	// ✅ Send offer to all other clients (usually just the callee)
+	for conn := range room.clients {
+		if conn != sender {
+			err := conn.WriteJSON(msg)
+			if err != nil {
+				log.Printf("error forwarding offer: %v", err)
+			} else {
+				log.Printf("Forwarded offer to callee in call %s", msg.CallID)
+			}
+		}
+	}
 }
+
 
 func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
@@ -190,26 +187,41 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
-	room, exists := rooms[msg.CallID]
-	if !exists {
-		log.Printf("no room found for call %s", msg.CallID)
-		return
+	// ✅ Create room if it doesn't exist
+	if _, exists := rooms[msg.CallID]; !exists {
+		rooms[msg.CallID] = &Room{
+			clients: make(map[*websocket.Conn]bool),
+		}
+		log.Printf("Created new room for call %s (via join_call)", msg.CallID)
 	}
 
-	// Add sender to room and set their callID
+	room := rooms[msg.CallID]
 	room.clients[sender] = true
+
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
 	clientsMu.Unlock()
 
-	// Send the stored offer to the new participant
+	log.Printf("Client joined call %s", msg.CallID)
+
+	// ✅ Send stored offer if it exists
 	if room.offer != nil {
 		err := sender.WriteJSON(*room.offer)
 		if err != nil {
-			log.Printf("error sending offer to new participant: %v", err)
+			log.Printf("error sending stored offer to callee: %v", err)
+		} else {
+			log.Printf("Sent stored offer to callee in call %s", msg.CallID)
 		}
+	} else {
+		// Optional: send "waiting for offer" message
+		sender.WriteJSON(Message{
+			Type:   "call_joined",
+			CallID: msg.CallID,
+		})
 	}
 }
+
+
 
 func handleHangup(sender *websocket.Conn, callID string) {
 	roomsMu.Lock()
