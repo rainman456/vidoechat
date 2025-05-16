@@ -119,7 +119,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 
 	log.Printf("Client %s connected", clientID)
-	//broadcastPeerList()
+     broadcastPeerList()
 
 	go handleClient(client)
 }
