@@ -139,6 +139,11 @@
 
      try {
        if (msg.type === "offer" && !isCaller) {
+         if (!pc) {
+    pc = createPeerConnection();
+  }
+  const offer = JSON.parse(msg.data);
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
          if (!currentCallId && msg.callId) {
            currentCallId = msg.callId;
            callInput.value = currentCallId;
@@ -201,37 +206,31 @@
  }
 
  callButton.onclick = async () => {
-   isCaller = true;
-   currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
-   callInput.value = currentCallId;
-   callInput.readOnly = true;
+  if (!localStream) await webcamButton.onclick();
 
-   connectSocket();
+  isCaller = true;
+  currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
+  callInput.value = currentCallId;
+  callInput.readOnly = true;
 
-   hangupButton.disabled = false;
-   callButton.disabled = true;
-   answerButton.disabled = true;
   connectSocket();
- };
+};
 
- answerButton.onclick = async () => {
-   isCaller = false;
-   currentCallId = callInput.value.trim();
-   callInput.readOnly = true;
+answerButton.onclick = async () => {
+  if (!localStream) await webcamButton.onclick();
 
-   if (!currentCallId) {
-     alert("Please enter a Call ID to answer.");
-     callInput.readOnly = false;
-     return;
-   }
+  isCaller = false;
+  currentCallId = callInput.value.trim();
+  callInput.readOnly = true;
 
-   connectSocket();
+  if (!currentCallId) {
+    alert("Please enter a Call ID to answer.");
+    callInput.readOnly = false;
+    return;
+  }
 
-   hangupButton.disabled = false;
-   callButton.disabled = true;
-   answerButton.disabled = true;
-     connectSocket();
- };
+  connectSocket();
+};
 
  hangupButton.onclick = async () => {
    if (socket && socket.readyState === WebSocket.OPEN && currentCallId) {
