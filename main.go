@@ -287,46 +287,59 @@ func handleRegister(client *ClientInfo, msg Message) {
 }
 
 func handleInitiateCall(caller *ClientInfo, msg Message) {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
+    clientsMu.Lock()
+    defer clientsMu.Unlock()
 
-	if caller.Status != StatusIdle {
-		sendMessage(caller.Conn, Message{Type: "error", Data: "Already in a call"})
-		return
-	}
+    // Check if caller is already in a call
+    if caller.Status != StatusIdle {
+        sendMessage(caller.Conn, Message{Type: "error", Data: "Already in a call"})
+        return
+    }
 
-	var callee *ClientInfo
-	log.Printf("Client %s is initiating a call", caller.ID)
+    log.Printf("Client %s is initiating a call", caller.ID)
 
-	for _, c := range clientsByID {
-		if c.ID != caller.ID && c.Status == StatusIdle {
-			callee = c
-			break
-		}
-	}
+    // Find an available callee
+    var callee *ClientInfo
+    for _, c := range clientsByID {
+        if c.ID != caller.ID && c.Status == StatusIdle {
+            callee = c
+            break
+        }
+    }
 
-	if callee == nil {
-		sendMessage(caller.Conn, Message{Type: "error", Data: "No available peers"})
-		return
-	}
+    if callee == nil {
+        sendMessage(caller.Conn, Message{Type: "error", Data: "No available peers"})
+        return
+    }
 
-	callID := uuid.New().String()
-	caller.Status = StatusCalling
-	caller.CallID = callID
-	caller.IsCaller = true
+    // Verify callee is still idle (could have changed since we found them)
+    if callee.Status != StatusIdle {
+        sendMessage(caller.Conn, Message{Type: "error", Data: "Peer is no longer available"})
+        return
+    }
 
-	callee.Status = StatusRinging
-	callee.CallID = callID
-	callee.IsCaller = false
+    callID := msg.CallID
+    if callID == "" {
+        callID = uuid.New().String()
+    }
 
-	sendMessage(callee.Conn, Message{
-		Type:     "incoming_call",
-		CallID:   callID,
-		Data:     msg.Data,
-		CallerID: caller.ID,
-	})
+    // Update both caller and callee statuses atomically
+    caller.Status = StatusCalling
+    caller.CallID = callID
+    caller.IsCaller = true
 
-	broadcastPeerList()
+    callee.Status = StatusRinging
+    callee.CallID = callID
+    callee.IsCaller = false
+
+    sendMessage(callee.Conn, Message{
+        Type:     "incoming_call",
+        CallID:   callID,
+        Data:     msg.Data,
+        CallerID: caller.ID,
+    })
+
+    broadcastPeerList()
 }
 
 func handlePresenceUpdate(client *ClientInfo, msg Message) {
