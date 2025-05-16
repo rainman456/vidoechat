@@ -180,6 +180,10 @@ func handleClient(client *ClientInfo) {
 		clientsMu.Unlock()
 		return nil
 	})
+	client.Conn.SetCloseHandler(func(code int, text string) error {
+		log.Printf("Client %s sent close: %s", client.ID, text)
+		return nil
+	})
 
 	go startPingSender(client)
 
@@ -201,7 +205,7 @@ func handleClient(client *ClientInfo) {
 	}()
 
 	for {
-		client.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		//client.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		_, r, err := client.Conn.NextReader()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -224,6 +228,8 @@ func handleClient(client *ClientInfo) {
 			handleInitiateCall(client, msg)
 		case "accept_call":
 			handleAcceptCall(client, msg)
+		case "offer":
+            handleOffer(client, msg)
 		case "reject_call":
 			handleRejectCall(client, msg)
 		case "ice-candidate":
@@ -236,6 +242,7 @@ func handleClient(client *ClientInfo) {
 			handleRegister(client, msg)
 		case "presence_update":
 			handlePresenceUpdate(client, msg)
+		
 		default:
 			sendMessage(client.Conn, Message{Type: "error", Data: "Unknown message type"})
 		}
@@ -350,6 +357,29 @@ func handleAcceptCall(callee *ClientInfo, msg Message) {
 
 	broadcastPeerList()
 }
+
+func handleOffer(sender *ClientInfo, msg Message) {
+    roomsMu.RLock()
+    room, exists := rooms[msg.CallID]
+    roomsMu.RUnlock()
+    if !exists {
+        return
+    }
+
+    var recipient *websocket.Conn
+    if room.CallerConn == sender.Conn {
+        recipient = room.CalleeConn
+    } else {
+        recipient = room.CallerConn
+    }
+
+    sendMessage(recipient, Message{
+        Type:   "offer",
+        CallID: msg.CallID,
+        Data:   msg.Data,
+    })
+}
+
 
 func handleRejectCall(callee *ClientInfo, msg Message) {
 	clientsMu.Lock()
