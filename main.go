@@ -41,6 +41,7 @@ type Message struct {
 	CallerID string `json:"callerId,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	Peers    []Peer `json:"peers,omitempty"`
+	PeerID string `json:"peerId,omitempty"`
 }
 
 type Peer struct {
@@ -118,7 +119,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 
 	log.Printf("Client %s connected", clientID)
-	broadcastPeerList()
+	//broadcastPeerList()
 
 	go handleClient(client)
 }
@@ -174,12 +175,19 @@ func handleClient(client *ClientInfo) {
 func handleRegister(client *ClientInfo, msg Message) {
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
-	
-	if client, ok := clientsByID[client.ID]; ok {
-		client.Status = msg.Data // "idle" or other status
-	}
+
+	// Client ID is already set in handleConnections, we ensure it's known to client
+	client.Status = StatusIdle
+
+	// Send confirmation back
+	sendMessage(client.Conn, Message{
+		Type:   "register_success",
+		PeerID: client.ID, // use field already available
+	})
+
 	broadcastPeerList()
 }
+
 
 func handleInitiateCall(caller *ClientInfo, msg Message) {
 	clientsMu.Lock()
