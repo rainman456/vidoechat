@@ -10,7 +10,7 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true //For development only  restrict in production
+		return true // For development only – restrict in production
 	},
 }
 
@@ -31,11 +31,11 @@ type Room struct {
 }
 
 var (
-	clients    = make(map[*websocket.Conn]*Client)
+	clients     = make(map[*websocket.Conn]*Client)
 	idleClients = make(map[*websocket.Conn]bool)
-	rooms      = make(map[string]*Room)
-	clientsMu  sync.Mutex
-	roomsMu    sync.Mutex
+	rooms       = make(map[string]*Room)
+	clientsMu   sync.Mutex
+	roomsMu     sync.Mutex
 )
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
@@ -45,14 +45,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	Add new client
+	// Add new client
 	clientsMu.Lock()
 	clients[ws] = &Client{conn: ws}
 	idleClients[ws] = true
 	clientsMu.Unlock()
 
 	defer func() {
-		Clean up on disconnect
+		// Clean up on disconnect
 		clientsMu.Lock()
 		client := clients[ws]
 		if client != nil && client.callID != "" {
@@ -104,21 +104,21 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
-	delete(idleClients, sender) Sender is no longer idle
+	delete(idleClients, sender) // Sender is no longer idle
 
-	Try to find an available idle client to automatically join
+	// Try to find an available idle client to automatically join
 	for conn := range idleClients {
 		if conn != sender {
 			rooms[msg.CallID].clients[conn] = true
 			if client, ok := clients[conn]; ok {
 				client.callID = msg.CallID
 			}
-			delete(idleClients, conn) Callee is no longer idle
+			delete(idleClients, conn) // Callee is no longer idle
 
-			Send join notification and offer
+			// Send join notification and offer
 			joinMsg := Message{Type: "call_joined", CallID: msg.CallID}
 			conn.WriteJSON(joinMsg)
-			conn.WriteJSON(msg) Send offer
+			conn.WriteJSON(msg) // Send offer
 
 			break
 		}
@@ -127,7 +127,6 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 
 	log.Printf("offer received for call %s", msg.CallID)
 }
-
 
 func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
@@ -139,13 +138,13 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 		return
 	}
 
-	Add sender to room and set their callID
+	// Add sender to room and set their callID
 	room.clients[sender] = true
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
 	clientsMu.Unlock()
 
-	Send answer to all other clients in the room
+	// Send answer to all other clients in the room
 	for client := range room.clients {
 		if client != sender {
 			err := client.WriteJSON(msg)
@@ -171,7 +170,7 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 		return
 	}
 
-	Send ICE candidate to all other clients in the room
+	// Send ICE candidate to all other clients in the room
 	for client := range room.clients {
 		if client != sender {
 			err := client.WriteJSON(msg)
@@ -197,13 +196,13 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 		return
 	}
 
-	Add sender to room and set their callID
+	// Add sender to room and set their callID
 	room.clients[sender] = true
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
 	clientsMu.Unlock()
 
-	Send the stored offer to the new participant
+	// Send the stored offer to the new participant
 	if room.offer != nil {
 		err := sender.WriteJSON(*room.offer)
 		if err != nil {
@@ -221,7 +220,7 @@ func handleHangup(sender *websocket.Conn, callID string) {
 		return
 	}
 
-	Notify other clients in the room
+	// Notify other clients in the room
 	for client := range room.clients {
 		if client != sender {
 			err := client.WriteJSON(Message{
@@ -234,25 +233,23 @@ func handleHangup(sender *websocket.Conn, callID string) {
 		}
 	}
 
-	Clean up client state
+	// Clean up client state
 	clientsMu.Lock()
 	for client := range room.clients {
 		if c, ok := clients[client]; ok {
-			c.callID = ""               //Reset call ID
-			idleClients[client] = true //Make them available for another call
+			c.callID = ""               // Reset call ID
+			idleClients[client] = true // Make them available for another call
 		}
 	}
 	clientsMu.Unlock()
 
-	Delete the room
+	// Delete the room
 	delete(rooms, callID)
 }
-
 
 func main() {
 	fs := http.FileServer(http.Dir("./client"))
 	http.Handle("/", fs)
-
 	http.HandleFunc("/ws", handleConnections)
 
 	log.Println("http server started on port 8000")
