@@ -72,11 +72,21 @@ func sendMessage(conn *websocket.Conn, msg Message) {
 	if conn == nil {
 		return
 	}
-
-	// Avoid blocking indefinitely on slow/stuck connections
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(msg); err != nil {
 		log.Printf("Error sending message: %v", err)
+
+		// Optional: remove dead clients
+		clientsMu.Lock()
+		if client, exists := clients[conn]; exists {
+			conn.Close()
+			delete(clientsByID, client.ID)
+			delete(clients, conn)
+			log.Printf("Removed client %s due to write failure", client.ID)
+		}
+		clientsMu.Unlock()
+
+		broadcastPeerList()
 	}
 }
 
@@ -107,11 +117,7 @@ func broadcastPeerList() {
 	}
 
 	for _, conn := range conns {
-		go func(c *websocket.Conn) {
-			if err := c.WriteJSON(msg); err != nil {
-				log.Printf("Failed to write peer_list to conn: %v", err)
-			}
-		}(conn)
+		go sendMessage(conn, msg)
 	}
 }
 
@@ -385,23 +391,32 @@ func handleOffer(sender *ClientInfo, msg Message) {
 		log.Printf("handleOffer: sender is nil")
 		return
 	}
+
+	if sender.CallID != msg.CallID {
+		log.Printf("handleOffer: callID mismatch. sender: %s, msg: %s", sender.CallID, msg.CallID)
+		return
+	}
+
 	roomsMu.RLock()
 	room, exists := rooms[msg.CallID]
 	roomsMu.RUnlock()
 	if !exists {
-		log.Printf("handleOffer: room %s not found", msg.CallID)
+		log.Printf("handleOffer: no room with callID %s", msg.CallID)
 		return
 	}
 
 	var recipient *websocket.Conn
 	if room.CallerConn == sender.Conn {
 		recipient = room.CalleeConn
-	} else {
+	} else if room.CalleeConn == sender.Conn {
 		recipient = room.CallerConn
+	} else {
+		log.Printf("handleOffer: sender not part of room %s", msg.CallID)
+		return
 	}
 
 	if recipient == nil {
-		log.Printf("handleOffer: recipient connection is nil")
+		log.Printf("handleOffer: recipient connection nil for call %s", msg.CallID)
 		return
 	}
 
@@ -411,6 +426,7 @@ func handleOffer(sender *ClientInfo, msg Message) {
 		Data:   msg.Data,
 	})
 }
+
 
 
 
@@ -440,19 +456,36 @@ func handleRejectCall(callee *ClientInfo, msg Message) {
 }
 
 func handleICECandidate(sender *ClientInfo, msg Message) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+
+	if sender.CallID != msg.CallID {
+		log.Printf("ICE candidate from client %s with mismatched callID: %s (expected %s)", sender.ID, msg.CallID, sender.CallID)
+		return
+	}
+
 	roomsMu.RLock()
 	room, exists := rooms[msg.CallID]
 	roomsMu.RUnlock()
 
 	if !exists {
+		log.Printf("ICE candidate for non-existing call: %s", msg.CallID)
 		return
 	}
 
 	var recipient *websocket.Conn
 	if room.CallerConn == sender.Conn {
 		recipient = room.CalleeConn
-	} else {
+	} else if room.CalleeConn == sender.Conn {
 		recipient = room.CallerConn
+	} else {
+		log.Printf("ICE candidate sender %s not part of call room %s", sender.ID, msg.CallID)
+		return
+	}
+
+	if recipient == nil {
+		log.Printf("ICE candidate recipient connection is nil for call %s", msg.CallID)
+		return
 	}
 
 	sendMessage(recipient, Message{
@@ -461,6 +494,7 @@ func handleICECandidate(sender *ClientInfo, msg Message) {
 		Data:   msg.Data,
 	})
 }
+
 
 func handleHangup(conn *websocket.Conn, callID, reason string) {
 	var otherConn *websocket.Conn
