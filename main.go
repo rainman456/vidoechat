@@ -511,7 +511,11 @@ func handleHangup(conn *websocket.Conn, callID, reason string) {
 	}
 	roomsMu.Unlock()
 
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+
 	if otherConn != nil {
+		log.Printf("Sending peer_disconnected to %s because %s hung up", clients[otherConn].ID, reason)
 		sendMessage(otherConn, Message{
 			Type:   "peer_disconnected",
 			CallID: callID,
@@ -520,15 +524,15 @@ func handleHangup(conn *websocket.Conn, callID, reason string) {
 		resetClientState(clients[otherConn])
 	}
 
-	resetClientState(clients[conn])
+	if client, ok := clients[conn]; ok {
+		resetClientState(client)
+	}
+
 	broadcastPeerList()
 }
 
 
 func resetClientState(client *ClientInfo) {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
-
 	client.Status = StatusIdle
 	client.CallID = ""
 	client.IsCaller = false
