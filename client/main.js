@@ -16,6 +16,8 @@ const incomingModal = document.getElementById('incomingModal');
 const acceptCallBtn = document.getElementById('acceptCallBtn');
 const rejectCallBtn = document.getElementById('rejectCallBtn');
 const ringtone = document.getElementById('ringtone');
+const remoteVideo = document.getElementById('remoteVideo');
+
 
 // State variables
 let pc = null;
@@ -121,12 +123,20 @@ function connectSocket() {
 
     socket.onopen = () => {
         console.log("WebSocket connected");
+        socket.send(JSON.stringify({
+        type: "register",
+        // id: optional unique peer ID if needed
+    }));
         startKeepalive();
         sendPresenceUpdate();
         
         // If we were trying to call when socket reconnected
         if (isCaller && currentCallId) {
-            sendInitiateCall();
+            socket.send(JSON.stringify({
+        type: "initiate_call",
+        callId: currentCallId,
+        data: JSON.stringify(pc.localDescription)
+    }));
         }
     };
 
@@ -301,8 +311,8 @@ function handleIncomingCall(msg) {
     currentCallId = msg.callId;
     showIncomingCallModal(msg.callerId);
     
-    pc = createPeerConnection();
-    pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+    pc = await createPeerConnection();
+    await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
 }
 
 function showIncomingCallModal(callerId) {
