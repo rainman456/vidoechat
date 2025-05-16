@@ -290,13 +290,29 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
     clientsMu.Lock()
     defer clientsMu.Unlock()
 
+    // Validate caller state
     if caller.Status != StatusIdle {
-        sendMessage(caller.Conn, Message{Type: "error", Data: "Already in a call"})
+        sendMessage(caller.Conn, Message{
+            Type: "error", 
+            Data: "Already in a call",
+            CallID: msg.CallID, // Include callID in error response
+        })
         return
     }
 
-    log.Printf("Client %s is initiating a call with offer: %s", caller.ID, msg.Data)
+    // Validate offer data
+    if msg.Data == "" {
+        sendMessage(caller.Conn, Message{
+            Type: "error",
+            Data: "Missing offer data",
+            CallID: msg.CallID,
+        })
+        return
+    }
 
+    log.Printf("Client %s initiating call with ID %s", caller.ID, msg.CallID)
+
+    // Find available callee
     var callee *ClientInfo
     for _, c := range clientsByID {
         if c.ID != caller.ID && c.Status == StatusIdle {
@@ -306,47 +322,59 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
     }
 
     if callee == nil {
-        sendMessage(caller.Conn, Message{Type: "error", Data: "No available peers"})
+        sendMessage(caller.Conn, Message{
+            Type: "error",
+            Data: "No available peers",
+            CallID: msg.CallID,
+        })
         return
     }
 
-    if callee.Status != StatusIdle {
-        sendMessage(caller.Conn, Message{Type: "error", Data: "Peer is no longer available"})
-        return
-    }
-
+    // Generate call ID if not provided
     callID := msg.CallID
     if callID == "" {
         callID = uuid.New().String()
+        log.Printf("Generated new call ID: %s", callID)
     }
 
-    // Create room immediately with just the caller
+    // Update caller state FIRST
+    caller.Status = StatusCalling
+    caller.CallID = callID  // This was missing in your original code
+    caller.IsCaller = true
+
+    // Update callee state
+    callee.Status = StatusRinging
+    callee.CallID = callID  // Critical for ICE candidate routing
+    callee.IsCaller = false
+
+    // Create room with both participants
     roomsMu.Lock()
     rooms[callID] = &Room{
         ID:           callID,
-        Participants: map[*websocket.Conn]bool{caller.Conn: true},
+        Participants: map[*websocket.Conn]bool{caller.Conn: true, callee.Conn: true},
         CallerConn:   caller.Conn,
+        CalleeConn:   callee.Conn,
     }
     roomsMu.Unlock()
 
-    // Update states
-    caller.Status = StatusCalling
-    caller.CallID = callID
-    caller.IsCaller = true
-
-    callee.Status = StatusRinging
-    callee.CallID = callID
-    callee.IsCaller = false
-
-    // Forward the offer directly to callee
+    // Send offer to callee with all required fields
     sendMessage(callee.Conn, Message{
-        Type:     "offer",  // Changed from "incoming_call" to "offer"
+        Type:     "offer",
         CallID:   callID,
         Data:     msg.Data,
         CallerID: caller.ID,
+        PeerID:   caller.ID, // Helps identify who is calling
+    })
+
+    // Notify caller that call was initiated
+    sendMessage(caller.Conn, Message{
+        Type:   "call_initiated",
+        CallID: callID,
+        PeerID: callee.ID,
     })
 
     broadcastPeerList()
+    log.Printf("Call %s initiated between %s and %s", callID, caller.ID, callee.ID)
 }
 
 func handlePresenceUpdate(client *ClientInfo, msg Message) {
