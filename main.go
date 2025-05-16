@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -18,8 +19,10 @@ const (
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:   1024,
+	WriteBufferSize:  1024,
+	HandshakeTimeout: 10 * time.Second,
+	EnableCompression: true,
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins for development
 	},
@@ -41,7 +44,7 @@ type Message struct {
 	CallerID string `json:"callerId,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	Peers    []Peer `json:"peers,omitempty"`
-	PeerID string `json:"peerId,omitempty"`
+	PeerID   string `json:"peerId,omitempty"`
 	Status   string `json:"status,omitempty"`
 }
 
@@ -99,6 +102,48 @@ func broadcastPeerList() {
 	}
 }
 
+func startPingSender(client *ClientInfo) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			clientsMu.RLock()
+			if _, ok := clients[client.Conn]; !ok {
+				clientsMu.RUnlock()
+				return
+			}
+			clientsMu.RUnlock()
+
+			if err := client.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+				log.Printf("Error sending ping to %s: %v", client.ID, err)
+				return
+			}
+		}
+	}
+}
+
+func checkClientTimeouts() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		clientsMu.Lock()
+		now := time.Now()
+		for conn, client := range clients {
+			if now.Sub(client.LastSeen) > 2*time.Minute {
+				log.Printf("Client %s timed out", client.ID)
+				conn.Close()
+				delete(clientsByID, client.ID)
+				delete(clients, conn)
+			}
+		}
+		clientsMu.Unlock()
+	}
+}
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -120,15 +165,29 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 
 	log.Printf("Client %s connected", clientID)
-     broadcastPeerList()
+	broadcastPeerList()
 
 	go handleClient(client)
 }
 
 func handleClient(client *ClientInfo) {
-	defer func() {
+	// Set pong handler
+	client.Conn.SetPongHandler(func(string) error {
 		clientsMu.Lock()
 		if c, ok := clients[client.Conn]; ok {
+			c.LastSeen = time.Now()
+		}
+		clientsMu.Unlock()
+		return nil
+	})
+
+	go startPingSender(client)
+
+	defer func() {
+		log.Printf("Client %s disconnecting...", client.ID)
+		clientsMu.Lock()
+		if c, ok := clients[client.Conn]; ok {
+			log.Printf("Removing client %s from registry", c.ID)
 			if c.Status == StatusInCall || c.Status == StatusCalling || c.Status == StatusRinging {
 				handleHangup(client.Conn, c.CallID, "disconnected")
 			}
@@ -137,16 +196,24 @@ func handleClient(client *ClientInfo) {
 		}
 		clientsMu.Unlock()
 		client.Conn.Close()
+		log.Printf("Broadcasting updated peer list after client %s disconnect", client.ID)
 		broadcastPeerList()
 	}()
 
 	for {
-		var msg Message
-		if err := client.Conn.ReadJSON(&msg); err != nil {
+		client.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_, r, err := client.Conn.NextReader()
+		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("Client %s disconnected unexpectedly: %v", client.ID, err)
 			}
 			return
+		}
+
+		var msg Message
+		if err := json.NewDecoder(r).Decode(&msg); err != nil {
+			log.Printf("Error decoding message from %s: %v", client.ID, err)
+			continue
 		}
 
 		client.LastSeen = time.Now()
@@ -168,7 +235,7 @@ func handleClient(client *ClientInfo) {
 		case "register":
 			handleRegister(client, msg)
 		case "presence_update":
-		     handlePresenceUpdate(client, msg)
+			handlePresenceUpdate(client, msg)
 		default:
 			sendMessage(client.Conn, Message{Type: "error", Data: "Unknown message type"})
 		}
@@ -177,19 +244,16 @@ func handleClient(client *ClientInfo) {
 
 func handleRegister(client *ClientInfo, msg Message) {
 	clientsMu.Lock()
-
 	client.Status = StatusIdle
-	clientsMu.Unlock() // 🔓 UNLOCK before calling broadcast
+	clientsMu.Unlock()
 
-	// Send confirmation
 	sendMessage(client.Conn, Message{
 		Type:   "register_success",
 		PeerID: client.ID,
 	})
 
-	broadcastPeerList() // ✅ now it won't deadlock
+	broadcastPeerList()
 }
-
 
 func handleInitiateCall(caller *ClientInfo, msg Message) {
 	clientsMu.Lock()
@@ -233,21 +297,20 @@ func handleInitiateCall(caller *ClientInfo, msg Message) {
 
 	broadcastPeerList()
 }
+
 func handlePresenceUpdate(client *ClientInfo, msg Message) {
-    if msg.Data == "" {
-        // If you prefer status in msg.Data, or else add a field in Message for status
-        return
-    }
+	if msg.Status == "" {
+		return
+	}
 
-    clientsMu.Lock()
-    defer clientsMu.Unlock()
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
 
-    client.Status = msg.Status // Assuming the client sends status as "data" field
-    client.LastSeen = time.Now()
+	client.Status = msg.Status
+	client.LastSeen = time.Now()
 
-    broadcastPeerList()
+	broadcastPeerList()
 }
-
 
 func handleAcceptCall(callee *ClientInfo, msg Message) {
 	roomsMu.Lock()
@@ -379,6 +442,8 @@ func resetClientState(client *ClientInfo) {
 }
 
 func main() {
+	go checkClientTimeouts()
+
 	http.Handle("/", http.FileServer(http.Dir("./client")))
 	http.HandleFunc("/ws", handleConnections)
 
