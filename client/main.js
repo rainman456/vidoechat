@@ -69,7 +69,7 @@
      console.error("Error accessing media devices.", e);
      alert("Error accessing media devices: " + e.message);
    }
-   connectSocket(); 
+   //connectSocket(); 
 
  };
 
@@ -211,6 +211,7 @@
    hangupButton.disabled = false;
    callButton.disabled = true;
    answerButton.disabled = true;
+  connectSocket();
  };
 
  answerButton.onclick = async () => {
@@ -229,6 +230,7 @@
    hangupButton.disabled = false;
    callButton.disabled = true;
    answerButton.disabled = true;
+     connectSocket();
  };
 
  hangupButton.onclick = async () => {
