@@ -183,21 +183,56 @@ async function createPeerConnection() {
 }
 
 async function startCall() {
-    if (!localStream) return alert("Start webcam first");
-    isCaller = true;
-    currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
-    updateUIState('calling');
-    sendPresenceUpdate();
+    if (!localStream) {
+        alert("Start webcam first");
+        return;
+    }
+    
+    // Prevent multiple calls
+    if (currentCallId || isCaller) {
+        alert("You're already in a call");
+        return;
+    }
 
-    pc = await createPeerConnection();
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    // Ensure WebSocket is connected
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        alert("Not connected to server");
+        return;
+    }
 
-    socket.send(JSON.stringify({
-        type: "initiate_call",
-        callId: currentCallId,
-        data: JSON.stringify(offer)
-    }));
+    try {
+        isCaller = true;
+        currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
+        updateUIState('calling');
+        sendPresenceUpdate();
+
+        pc = await createPeerConnection();
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Wait for ICE gathering to complete
+        const offerWithCandidates = await new Promise((resolve) => {
+            if (pc.iceGatheringState === 'complete') {
+                resolve(pc.localDescription);
+            } else {
+                pc.onicegatheringstatechange = () => {
+                    if (pc.iceGatheringState === 'complete') {
+                        resolve(pc.localDescription);
+                    }
+                };
+            }
+        });
+
+        socket.send(JSON.stringify({
+            type: "initiate_call",
+            callId: currentCallId,
+            data: JSON.stringify(offerWithCandidates)
+        }));
+    } catch (err) {
+        console.error("Call setup failed:", err);
+        resetCallState();
+        alert("Call failed to start");
+    }
 }
 
 async function answerCall() {
@@ -226,21 +261,46 @@ function hangup() {
 }
 
 async function handleIncomingCall(msg) {
-    if (isCaller || currentCallId) {
-        socket.send(JSON.stringify({ type: "reject_call", callId: msg.callId, reason: "busy" }));
+    // Check if already in a call
+    if (currentCallId) {
+        socket.send(JSON.stringify({ 
+            type: "reject_call", 
+            callId: msg.callId, 
+            reason: "busy" 
+        }));
         return;
     }
 
-    currentCallId = msg.callId;
-    isCaller = false;
-    showIncomingCallModal(msg.callerId);
-
-    pc = await createPeerConnection();
     try {
+        currentCallId = msg.callId;
+        isCaller = false;
+        showIncomingCallModal(msg.callerId);
+
+        if (!localStream) {
+            // Optionally get media here if not already done
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                video: true, 
+                audio: true 
+            });
+            webcamVideo.srcObject = localStream;
+            webcamVideo.muted = true;
+        }
+
+        pc = await createPeerConnection();
         await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+        
+        // Add any candidates that arrived before the offer
+        pendingCandidates.forEach(candidate => {
+            pc.addIceCandidate(candidate).catch(console.error);
+        });
+        pendingCandidates = [];
     } catch (err) {
-        console.error("Invalid remote description:", err);
-        socket.send(JSON.stringify({ type: "reject_call", callId: msg.callId, reason: "invalid_offer" }));
+        console.error("Error handling incoming call:", err);
+        socket.send(JSON.stringify({ 
+            type: "reject_call", 
+            callId: msg.callId, 
+            reason: "error" 
+        }));
         resetCallState();
     }
 }
