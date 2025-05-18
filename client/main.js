@@ -127,18 +127,29 @@ function connectSocket() {
     }
 
     if (isCaller && currentCallId) {
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-        socket.send(JSON.stringify({
-          type: "offer",
-          callId: currentCallId,
-          data: JSON.stringify(pc.localDescription),
-        }));
-      } catch (e) {
-        console.error("Error creating or sending offer:", e);
-      }
+    // ✅ 1. Send the offer
+    socket.send(JSON.stringify({
+      type: "offer",
+      callId: currentCallId,
+      data: JSON.stringify(pc.localDescription),
+    }));
+
+    // ✅ 2. THEN send the incoming_call notification
+    socket.send(JSON.stringify({
+      type: "incoming_call",
+      callId: currentCallId,
+      from: "Caller"
+    }));
+
+  } catch (e) {
+    console.error("Error creating or sending offer:", e);
+  }
+
+
     } else if (!isCaller && currentCallId) {
       socket.send(JSON.stringify({
         type: "join_call",
@@ -261,21 +272,8 @@ callButton.onclick = async () => {
  if (!socket || socket.readyState !== WebSocket.OPEN) {
   connectSocket();
 }
-
-
-  // Delay this until socket is open
-  const sendIncoming = () => {
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({
-        type: "incoming_call",
-        callId: currentCallId,
-        from: "Caller"
-      }));
-    } else {
-      setTimeout(sendIncoming, 100);
-    }
-  };
-  sendIncoming();
+// Delay this until socket is open
+  
 };
 
 
