@@ -291,6 +291,8 @@ answerButton.onclick = async () => {
     callInput.readOnly = false;
     return;
   }
+  hideIncomingModal(); // if any
+
 
   if (!socket || socket.readyState !== WebSocket.OPEN) {
   connectSocket();
