@@ -225,14 +225,12 @@ callButton.onclick = async () => {
   currentCallId = "call_" + Math.random().toString(36).substring(2, 11);
   callInput.value = currentCallId;
   callInput.readOnly = true;
-  connectSocket()
+  await connectSocket();
   socket.send(JSON.stringify({
     type: "incoming_call",
     callId: currentCallId,
     from: "Caller" // Optional: your name or ID
   }));
-
-  
 };
 
 answerButton.onclick = async () => {
