@@ -101,9 +101,9 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
     roomsMu.Lock()
     room, exists := rooms[callID]
     if !exists {
-    log.Printf("Tried to accept call %s, but room does not exist", callID)
+   log.Printf("Tried to accept call %s, but room does not exist", callID)
     roomsMu.Unlock()
-    conn.WriteJSON(Message{
+    _ = conn.WriteJSON(Message{
         Type: "error",
         Data: "Call offer not found or expired",
     })
@@ -265,15 +265,16 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
-	// ✅ Create room if it doesn't exist
-	if _, exists := rooms[msg.CallID]; !exists {
-		rooms[msg.CallID] = &Room{
-			clients: make(map[*websocket.Conn]bool),
-		}
-		log.Printf("Created new room for call %s (via join_call)", msg.CallID)
+	room, exists := rooms[msg.CallID]
+	if !exists {
+		log.Printf("Tried to join call %s, but room does not exist", msg.CallID)
+		_ = sender.WriteJSON(Message{
+			Type: "error",
+			Data: "Call not found or not yet started",
+		})
+		return
 	}
 
-	room := rooms[msg.CallID]
 	room.clients[sender] = true
 
 	clientsMu.Lock()
@@ -282,7 +283,6 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 
 	log.Printf("Client joined call %s", msg.CallID)
 
-	// ✅ Send stored offer if it exists
 	if room.offer != nil {
 		err := sender.WriteJSON(*room.offer)
 		if err != nil {
@@ -291,7 +291,6 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 			log.Printf("Sent stored offer to callee in call %s", msg.CallID)
 		}
 	} else {
-		// Optional: send "waiting for offer" message
 		sender.WriteJSON(Message{
 			Type:   "call_joined",
 			CallID: msg.CallID,
