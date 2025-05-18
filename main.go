@@ -309,39 +309,41 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 
 
 func handleHangup(sender *websocket.Conn, callID string) {
-	roomsMu.Lock()
-	defer roomsMu.Unlock()
+    roomsMu.Lock()
+    defer roomsMu.Unlock()
 
-	room, exists := rooms[callID]
-	if !exists {
-		return
-	}
+    room, exists := rooms[callID]
+    if !exists {
+        return
+    }
 
-	// Notify other clients in the room
-	for client := range room.clients {
-		if client != sender {
-			err := client.WriteJSON(Message{
-				Type:   "peer_disconnected",
-				CallID: callID,
-			})
-			if err != nil {
-				log.Printf("error sending hangup notification: %v", err)
-			}
-		}
-	}
+    // Remove only the disconnecting client from the room
+    delete(room.clients, sender)
 
-	// Clean up client state
-	clientsMu.Lock()
-	for client := range room.clients {
-		if c, ok := clients[client]; ok {
-			c.callID = ""               // Reset call ID
-			idleClients[client] = true // Make them available for another call
-		}
-	}
-	clientsMu.Unlock()
+    // Notify remaining clients about the disconnection
+    for client := range room.clients {
+        err := client.WriteJSON(Message{
+            Type:   "peer_disconnected",
+            CallID: callID,
+        })
+        if err != nil {
+            log.Printf("error sending hangup notification: %v", err)
+        }
+    }
 
-	// Delete the room
-	delete(rooms, callID)
+    // Clean up the disconnecting client's state
+    clientsMu.Lock()
+    if c, ok := clients[sender]; ok {
+        c.callID = ""               // Reset their call ID
+        idleClients[sender] = true  // Make them available again
+    }
+    clientsMu.Unlock()
+
+    // Only delete the room if it's empty
+    if len(room.clients) == 0 {
+        delete(rooms, callID)
+        log.Printf("Deleted empty room %s", callID)
+    }
 }
 
 func main() {
