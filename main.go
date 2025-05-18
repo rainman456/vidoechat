@@ -23,6 +23,7 @@ type Message struct {
 	Type   string `json:"type"`
 	CallID string `json:"callId,omitempty"`
 	Data   string `json:"data,omitempty"`
+	From   string `json:"from,omitempty"`
 }
 
 type Room struct {
@@ -75,6 +76,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		switch msg.Type {
 		case "offer":
 			handleOffer(ws, msg)
+		case "incoming_call":
+			handleIncomingCall(ws, msg)
+		case "accept_call":
+			handleAcceptCall(ws, msg)
 		case "answer":
 			handleAnswer(ws, msg)
 		case "ice-candidate":
@@ -88,6 +93,86 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+
+func handleIncomingCall(sender *websocket.Conn, msg Message) {
+	callID := msg.CallID
+
+	roomsMu.Lock()
+	if _, exists := rooms[callID]; !exists {
+		rooms[callID] = &Room{
+			clients: make(map[*websocket.Conn]bool),
+		}
+		log.Printf("Created room %s for incoming call", callID)
+	}
+	room := rooms[callID]
+	room.clients[sender] = true
+	roomsMu.Unlock()
+
+	clientsMu.Lock()
+	clients[sender].callID = callID
+	clientsMu.Unlock()
+
+	// Broadcast incoming call to all idle clients
+	clientsMu.Lock()
+	for conn := range idleClients {
+		if conn != sender {
+			err := conn.WriteJSON(Message{
+				Type:   "incoming_call",
+				CallID: callID,
+				From:   msg.From, // optional name
+			})
+			if err != nil {
+				log.Printf("error broadcasting incoming call: %v", err)
+			}
+		}
+	}
+	clientsMu.Unlock()
+}
+
+func handleAcceptCall(conn *websocket.Conn, msg Message) {
+	callID := msg.CallID
+
+	roomsMu.Lock()
+	room, exists := rooms[callID]
+	if !exists || room.offer == nil {
+		log.Printf("Call room %s not found or no offer", callID)
+		roomsMu.Unlock()
+		return
+	}
+
+	// Add this connection to the room
+	room.clients[conn] = true
+	roomsMu.Unlock()
+
+	clientsMu.Lock()
+	clients[conn].callID = callID
+	delete(idleClients, conn) // they're now in a call
+	clientsMu.Unlock()
+
+	// Send the offer to the accepting client
+	err := conn.WriteJSON(*room.offer)
+	if err != nil {
+		log.Printf("Failed to send offer to callee: %v", err)
+		return
+	}
+
+	// Notify other clients to cancel modal
+	clientsMu.Lock()
+	for other := range idleClients {
+		if other != conn {
+			_ = other.WriteJSON(Message{
+				Type:   "call_taken",
+				CallID: callID,
+			})
+		}
+	}
+	clientsMu.Unlock()
+
+	log.Printf("User accepted call %s, offer sent, others notified", callID)
+}
+
+
 
 func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
