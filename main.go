@@ -101,9 +101,13 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
     roomsMu.Lock()
     room, exists := rooms[callID]
     if !exists {
-    room = &Room{clients: make(map[*websocket.Conn]bool)}
-    rooms[callID] = room
-    log.Printf("Created new room for call %s (via accept)", callID)
+    log.Printf("Tried to accept call %s, but room does not exist", callID)
+    roomsMu.Unlock()
+    conn.WriteJSON(Message{
+        Type: "error",
+        Data: "Call offer not found or expired",
+    })
+    return
 }
 
     room.clients[conn] = true
