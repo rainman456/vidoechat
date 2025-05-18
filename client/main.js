@@ -320,19 +320,16 @@ hangupButton.disabled = true;
 
 acceptCallBtn.onclick = async () => {
   hideIncomingModal();
-
-  isCaller = false;
-  callInput.value = currentCallId;
-  callInput.readOnly = true;
-
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    connectSocket(); // Will trigger offer receive and response
-  }
-
-  socket.send(JSON.stringify({
-    type: "accept_call",
-    callId: currentCallId
-  }));
+    isCaller = false;
+    callInput.value = currentCallId;
+    callInput.readOnly = true;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        connectSocket();
+    }
+    socket.send(JSON.stringify({
+        type: "accept_call",
+        callId: currentCallId,
+    }));
 };
 
 rejectCallBtn.onclick = () => {
