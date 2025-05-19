@@ -9,17 +9,20 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// WebSocket upgrader configuration
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // For development only
 	},
 }
 
+// Client represents a connected WebSocket client
 type Client struct {
 	conn   *websocket.Conn
 	callID string
 }
 
+// Message represents a signaling message
 type Message struct {
 	Type   string `json:"type"`
 	CallID string `json:"callId,omitempty"`
@@ -27,11 +30,13 @@ type Message struct {
 	From   string `json:"from,omitempty"`
 }
 
+// Room represents a call session
 type Room struct {
 	clients map[*websocket.Conn]bool
 	offer   *Message
 }
 
+// Global state
 var (
 	clients     = make(map[*websocket.Conn]*Client)
 	idleClients = make(map[*websocket.Conn]bool)
@@ -40,6 +45,7 @@ var (
 	roomsMu     sync.Mutex
 )
 
+// handleConnections manages WebSocket connections
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -57,14 +63,11 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	log.Printf("New client connected: %v, total clients: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
-	defer func() {
-		cleanupClient(ws)
-	}()
+	defer cleanupClient(ws)
 
 	for {
 		var msg Message
-		err := ws.ReadJSON(&msg)
-		if err != nil {
+		if err := ws.ReadJSON(&msg); err != nil {
 			if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
 				log.Printf("Client %v disconnected: %v", ws.RemoteAddr(), err)
 			} else {
@@ -73,7 +76,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// Reset read deadline for next message
+		// Reset read deadline
 		ws.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch msg.Type {
@@ -97,6 +100,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// cleanupClient removes a client from all state
 func cleanupClient(ws *websocket.Conn) {
 	clientsMu.Lock()
 	client, exists := clients[ws]
@@ -108,7 +112,7 @@ func cleanupClient(ws *websocket.Conn) {
 	callID := client.callID
 	delete(clients, ws)
 	delete(idleClients, ws)
-	log.Printf("Removed client %v from clients and idleClients, remaining: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
+	log.Printf("Removed client %v, remaining clients: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
 	if callID != "" {
@@ -122,6 +126,7 @@ func cleanupClient(ws *websocket.Conn) {
 	}
 }
 
+// removeFromAllRooms removes a client from all rooms
 func removeFromAllRooms(conn *websocket.Conn) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
@@ -131,7 +136,6 @@ func removeFromAllRooms(conn *websocket.Conn) {
 			delete(rooms, callID)
 			log.Printf("Deleted empty room %s, remaining rooms: %d", callID, len(rooms))
 		} else {
-			// Notify remaining clients
 			for client := range room.clients {
 				if err := client.WriteJSON(Message{
 					Type:   "peer_disconnected",
@@ -146,13 +150,14 @@ func removeFromAllRooms(conn *websocket.Conn) {
 	log.Printf("Removed %v from all rooms, remaining rooms: %d", conn.RemoteAddr(), len(rooms))
 }
 
+// handleOffer processes offer messages
 func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
 	if !exists {
 		room = &Room{clients: make(map[*websocket.Conn]bool)}
 		rooms[msg.CallID] = room
-		log.Printf("Created new room for call %s (via offer)", msg.CallID)
+		log.Printf("Created new room for call %s", msg.CallID)
 	}
 	if room.offer == nil {
 		room.offer = &msg
@@ -169,6 +174,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	clientsMu.Unlock()
 }
 
+// handleAcceptCall processes call acceptance
 func handleAcceptCall(conn *websocket.Conn, msg Message) {
 	callID := msg.CallID
 	roomsMu.Lock()
@@ -181,8 +187,8 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 	roomsMu.Unlock()
 
 	if !exists {
-		if err := conn.WriteJSON(Message{Type: "error", Data: "Call offer not found or expired"}); err != nil {
-			log.Printf("Error sending error message to %v: %v", conn.RemoteAddr(), err)
+		if err := conn.WriteJSON(Message{Type: "error", Data: "Call offer not found"}); err != nil {
+			log.Printf("Error sending error to %v: %v", conn.RemoteAddr(), err)
 			go cleanupClient(conn)
 		}
 		return
@@ -223,10 +229,10 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 			}
 		}
 	}
-
 	log.Printf("User %v accepted call %s", conn.RemoteAddr(), callID)
 }
 
+// handleAnswer processes answer messages
 func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
@@ -253,7 +259,7 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 
 	for client := range roomClients {
 		if client != sender {
-			if err := client.WriteJSON(msg); errLDu 
+			if err := client.WriteJSON(msg); err != nil {
 				log.Printf("Error sending answer to %v: %v", client.RemoteAddr(), err)
 				go cleanupClient(client)
 			}
@@ -261,6 +267,7 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 	}
 }
 
+// handleICECandidate processes ICE candidate messages
 func handleICECandidate(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
@@ -274,7 +281,7 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 	roomsMu.Unlock()
 
 	if !exists {
-		log.Printf("No room found for ICE candidate call %s from %v", msg.CallID, sender.RemoteAddr())
+		log.Printf("No room for ICE candidate call %s from %v", msg.CallID, sender.RemoteAddr())
 		return
 	}
 
@@ -288,6 +295,7 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 	}
 }
 
+// handleJoinCall processes join call requests
 func handleJoinCall(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
@@ -301,9 +309,9 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	if !exists {
 		if err := sender.WriteJSON(Message{
 			Type: "error",
-			Data: "Call not found or not yet started",
+			Data: "Call not found",
 		}); err != nil {
-			log.Printf("Error sending error message to %v: %v", sender.RemoteAddr(), err)
+			log.Printf("Error sending error to %v: %v", sender.RemoteAddr(), err)
 			go cleanupClient(sender)
 		}
 		return
@@ -328,6 +336,7 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	}
 }
 
+// handleHangup processes hangup requests
 func handleHangup(sender *websocket.Conn, callID string) {
 	roomsMu.Lock()
 	room, exists := rooms[callID]
@@ -369,6 +378,7 @@ func handleHangup(sender *websocket.Conn, callID string) {
 	clientsMu.Unlock()
 }
 
+// handleIncomingCall processes incoming call notifications
 func handleIncomingCall(sender *websocket.Conn, msg Message) {
 	callID := msg.CallID
 
@@ -403,11 +413,10 @@ func handleIncomingCall(sender *websocket.Conn, msg Message) {
 			}
 		}
 	}
-
 	log.Printf("Incoming call %s from %v, notified %d idle clients", callID, sender.RemoteAddr(), len(idleClientsCopy))
 }
 
-// Periodic cleanup for stale rooms and clients
+// cleanupStaleResources periodically removes stale clients and rooms
 func cleanupStaleResources() {
 	for {
 		time.Sleep(30 * time.Second)
@@ -427,8 +436,8 @@ func cleanupStaleResources() {
 		roomsMu.Unlock()
 
 		clientsMu.Lock()
-		for ws, client := range clients {
-			if ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)) != nil {
+		for ws := range clients {
+			if err := ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
 				delete(clients, ws)
 				delete(idleClients, ws)
 				log.Printf("Removed stale client %v", ws.RemoteAddr())
@@ -445,12 +454,10 @@ func main() {
 	http.Handle("/", fs)
 	http.HandleFunc("/ws", handleConnections)
 
-	// Start periodic cleanup
 	go cleanupStaleResources()
 
 	log.Println("WebSocket signaling server running on :8000")
-	err := http.ListenAndServe(":8000", nil)
-	if err != nil {
+	if err := http.ListenAndServe(":8000", nil); err != nil {
 		log.Fatalf("ListenAndServe failed: %v", err)
 	}
 }
