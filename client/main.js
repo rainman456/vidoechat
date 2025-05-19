@@ -361,8 +361,8 @@ function resetCallState() {
     pc = null;
   }
 
-  if (socket) {
-    socket.close();
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.close(1000, "User hung up");
     socket = null;
   }
 
