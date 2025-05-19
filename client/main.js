@@ -126,31 +126,31 @@ function connectSocket() {
        pc = createPeerConnection();
     }
 
-    if (isCaller && currentCallId) {
-  try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+  //   if (isCaller && currentCallId) {
+  // try {
+  //   const offer = await pc.createOffer();
+  //   await pc.setLocalDescription(offer);
 
-    // ✅ 1. Send the offer
-    socket.send(JSON.stringify({
-      type: "offer",
-      callId: currentCallId,
-      data: JSON.stringify(pc.localDescription),
-    }));
+  //   // ✅ 1. Send the offer
+  //   socket.send(JSON.stringify({
+  //     type: "offer",
+  //     callId: currentCallId,
+  //     data: JSON.stringify(pc.localDescription),
+  //   }));
 
     // ✅ 2. THEN send the incoming_call notification
-    socket.send(JSON.stringify({
-      type: "incoming_call",
-      callId: currentCallId,
-      from: "Caller"
-    }));
+    // socket.send(JSON.stringify({
+    //   type: "incoming_call",
+    //   callId: currentCallId,
+    //   from: "Caller"
+    // }));
 
-  } catch (e) {
-    console.error("Error creating or sending offer:", e);
-  }
+  // } catch (e) {
+  //   console.error("Error creating or sending offer:", e);
+  // }
 
 
-    } else if (!isCaller && currentCallId) {
+     if (!isCaller && currentCallId) {
       socket.send(JSON.stringify({
         type: "join_call",
         callId: currentCallId,
@@ -178,7 +178,7 @@ function connectSocket() {
     }
   
     // Handle incoming_call and call_taken early
-    if (msg.type === "incoming_call") {
+    if (msg.type === "incoming_call" && !isCaller) {
       if (!localStream) {
         await webcamButton.onclick(); // Automatically prepare webcam
       }
@@ -187,8 +187,11 @@ function connectSocket() {
     }
   
     if (msg.type === "call_taken") {
-      hideIncomingModal(); // Someone else accepted
-      alert("Another user answered the call.");
+       if (!isCaller || !pc || pc.signalingState !== "stable") {
+    hideIncomingModal();
+    alert("Another user accepted the call.");
+    resetCallState();
+  }
       return;
     }
   
@@ -269,8 +272,14 @@ callButton.onclick = async () => {
   callInput.value = currentCallId;
   callInput.readOnly = true;
 
- const sendOfferAndIncomingCall = async () => {
+  const sendOfferAndIncomingCall = async () => {
     try {
+      socket.send(JSON.stringify({
+        type: "incoming_call",
+        callId: currentCallId,
+        from: "Caller"
+      }));
+
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -279,12 +288,6 @@ callButton.onclick = async () => {
         callId: currentCallId,
         data: JSON.stringify(pc.localDescription),
       }));
-
-      socket.send(JSON.stringify({
-        type: "incoming_call",
-        callId: currentCallId,
-        from: "Caller"
-      }));
     } catch (e) {
       console.error("Error sending offer or incoming_call:", e);
     }
@@ -292,13 +295,10 @@ callButton.onclick = async () => {
 
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     connectSocket();
-
     socket.addEventListener("open", sendOfferAndIncomingCall, { once: true });
   } else {
     await sendOfferAndIncomingCall();
   }
-// Delay this until socket is open
-  
 };
 
 
