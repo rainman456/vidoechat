@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -76,13 +77,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		err := ws.ReadJSON(&msg)
 		if err != nil {
 			if websocket.IsCloseError(err,
-			websocket.CloseGoingAway,
-			websocket.CloseNormalClosure,
-			websocket.CloseNoStatusReceived) {
-			log.Printf("client disconnected: %v", err)
-		} else {
-			log.Printf("unexpected WebSocket error: %v", err)
-		}
+				websocket.CloseGoingAway,
+				websocket.CloseNormalClosure,
+				websocket.CloseNoStatusReceived) {
+				log.Printf("client disconnected: %v", err)
+			} else {
+				log.Printf("unexpected WebSocket error: %v", err)
+			}
 			break
 		}
 
@@ -98,7 +99,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		case "ice-candidate":
 			handleICECandidate(ws, msg)
 		case "join_call":
-			handleJoinCall(ws, msg)
+		 handleJoinCall(ws, msg)
 		case "hangup":
 			handleHangup(ws, msg.CallID)
 		default:
@@ -133,6 +134,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	if client, ok := clients[sender]; ok {
 		client.callID = msg.CallID
 	}
+	delete(idleClients, sender) // Remove caller from idleClients
 	clientsMu.Unlock()
 }
 
@@ -297,6 +299,7 @@ func handleIncomingCall(sender *websocket.Conn, msg Message) {
 	if client, ok := clients[sender]; ok {
 		client.callID = callID
 	}
+	delete(idleClients, sender) // Remove caller from idleClients
 	for conn := range idleClients {
 		if conn != sender {
 			err := conn.WriteJSON(Message{
