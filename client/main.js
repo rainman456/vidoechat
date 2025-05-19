@@ -1,9 +1,9 @@
 
 const servers = {
     iceServers: [
-      {
-        urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
-      },
+        {
+            urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
+        },
     ],
     iceCandidatePoolSize: 10,
 };
@@ -60,16 +60,30 @@ function createPeerConnection() {
     pc = new RTCPeerConnection(servers);
 
     remoteStream = new MediaStream();
-    remoteVideo.srcObject = remoteStream;
+    if (remoteVideo) {
+        remoteVideo.srcObject = remoteStream;
+        remoteVideo.play().catch(e => console.error("Failed to play remote video:", e));
+    }
 
     pc.ontrack = (event) => {
-        event.streams[0].getTracks().forEach((track) => {
-            remoteStream.addTrack(track);
-        });
+        console.log("ontrack fired:", event.streams, event.track);
+        if (event.streams && event.streams[0]) {
+            event.streams[0].getTracks().forEach((track) => {
+                console.log("Adding track to remoteStream:", track);
+                remoteStream.addTrack(track);
+            });
+        } else {
+            console.warn("No streams in ontrack event:", event);
+        }
+        console.log("Current remoteStream tracks:", remoteStream.getTracks());
+        if (remoteVideo) {
+            remoteVideo.play().catch(e => console.error("Failed to play remote video after adding tracks:", e));
+        }
     };
 
     pc.onicecandidate = (event) => {
         if (event.candidate && socket && socket.readyState === WebSocket.OPEN && currentCallId) {
+            console.log("Sending ICE candidate:", event.candidate);
             socket.send(JSON.stringify({
                 type: "ice-candidate",
                 callId: currentCallId,
@@ -91,15 +105,19 @@ function createPeerConnection() {
 
 webcamButton.onclick = async () => {
     try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("WebRTC not supported in this browser");
+        }
         localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         pc = createPeerConnection();
 
         localStream.getTracks().forEach((track) => {
+            console.log("Adding local track:", track);
             pc.addTrack(track, localStream);
         });
 
         webcamVideo.srcObject = localStream;
-        remoteVideo.srcObject = remoteStream;
+        webcamVideo.play().catch(e => console.error("Failed to play local video:", e));
 
         callButton.disabled = false;
         answerButton.disabled = false;
@@ -144,6 +162,7 @@ function connectSocket(onOpenCallback = () => {}) {
             if (!msg.type || (msg.callId && typeof msg.callId !== 'string')) {
                 throw new Error("Invalid message structure");
             }
+            console.log("Received message:", msg);
         } catch (e) {
             console.error("Invalid JSON or message structure:", event.data, e);
             return;
@@ -155,7 +174,7 @@ function connectSocket(onOpenCallback = () => {}) {
             return;
         }
 
-        if (msg.type === "call_taken" && !isCaller) { // Only non-callers process call_taken
+        if (msg.type === "call_taken" && !isCaller) {
             hideIncomingModal();
             alert("Another user accepted the call.");
             resetCallState();
@@ -186,6 +205,7 @@ function connectSocket(onOpenCallback = () => {}) {
                 }));
 
                 for (const candidate of pendingCandidates) {
+                    console.log("Applying pending ICE candidate:", candidate);
                     await pc.addIceCandidate(candidate);
                 }
                 pendingCandidates = [];
@@ -195,13 +215,20 @@ function connectSocket(onOpenCallback = () => {}) {
             } else if (msg.type === "answer" && isCaller) {
                 const answer = JSON.parse(msg.data || '{}');
                 await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                for (const candidate of pendingCandidates) {
+                    console.log("Applying pending ICE candidate after answer:", candidate);
+                    await pc.addIceCandidate(candidate);
+                }
+                pendingCandidates = [];
                 hangupButton.disabled = false;
 
             } else if (msg.type === "ice-candidate") {
                 const candidate = new RTCIceCandidate(JSON.parse(msg.data || '{}'));
                 if (pc.remoteDescription && pc.remoteDescription.type) {
+                    console.log("Adding ICE candidate:", candidate);
                     await pc.addIceCandidate(candidate);
                 } else {
+                    console.log("Storing pending ICE candidate:", candidate);
                     pendingCandidates.push(candidate);
                 }
 
@@ -285,7 +312,7 @@ hangupButton.onclick = async () => {
 
 function resetCallState() {
     if (pc) {
-        pc.ontrack = null;
+        pc.ontrackths = null;
         pc.onicecandidate = null;
         pc.close();
         pc = null;
@@ -306,7 +333,7 @@ function resetCallState() {
     }
 
     if (webcamVideo) webcamVideo.srcObject = null;
-    if (remoteVideo) webcamVideo.srcObject = null;
+    if (remoteVideo) remoteVideo.srcObject = null;
 
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.close(1000, "User hung up");
