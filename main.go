@@ -75,7 +75,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		var msg Message
 		err := ws.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("error reading message: %v", err)
+			if websocket.IsCloseError(err,
+			websocket.CloseGoingAway,
+			websocket.CloseNormalClosure,
+			websocket.CloseNoStatusReceived) {
+			log.Printf("client disconnected: %v", err)
+		} else {
+			log.Printf("unexpected WebSocket error: %v", err)
+		}
 			break
 		}
 
