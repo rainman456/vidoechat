@@ -99,7 +99,7 @@ localStream.getTracks().forEach((track) => {
 });
 
     webcamVideo.srcObject = localStream;
-    //remoteVideo.srcObject = remoteStream;
+    remoteVideo.srcObject = remoteStream;
 
     callButton.disabled = false;
     answerButton.disabled = false;
