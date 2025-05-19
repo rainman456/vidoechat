@@ -164,9 +164,10 @@ function connectSocket(onOpenCallback = () => {}) {
 
     socket.onclose = () => {
         console.warn("WebSocket connection closed.");
-        alert("Disconnected from signaling server.");
+        alert("Disconnected from signaling server. Attempting to reconnect...");
         updateStatus("Disconnected from signaling server");
-        resetCallState();
+        // Attempt to reconnect after a delay
+        setTimeout(() => connectSocket(), 3000);
     };
 
     socket.onerror = (err) => {
@@ -396,6 +397,9 @@ function resetCallState() {
     hideIncomingModal();
     updateStatus("Call ended");
     updateConnectionStatus("Disconnected");
+
+    // Reconnect WebSocket to ensure new calls can be initiated
+    setTimeout(() => connectSocket(), 1000);
 }
 
 function showIncomingModal(callId, from) {
