@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -46,10 +47,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set read deadline to detect stale connections
+	ws.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 	clientsMu.Lock()
 	client := &Client{conn: ws}
 	clients[ws] = client
 	idleClients[ws] = true
+	log.Printf("New client connected: %v, total clients: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
 	defer func() {
@@ -61,12 +66,15 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		err := ws.ReadJSON(&msg)
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
-				log.Printf("Client disconnected: %v", err)
+				log.Printf("Client %v disconnected: %v", ws.RemoteAddr(), err)
 			} else {
-				log.Printf("Unexpected WebSocket error: %v", err)
+				log.Printf("WebSocket read error for %v: %v", ws.RemoteAddr(), err)
 			}
 			break
 		}
+
+		// Reset read deadline for next message
+		ws.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch msg.Type {
 		case "offer":
@@ -84,7 +92,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		case "hangup":
 			handleHangup(ws, msg.CallID)
 		default:
-			log.Printf("Unknown message type: %s", msg.Type)
+			log.Printf("Unknown message type from %v: %s", ws.RemoteAddr(), msg.Type)
 		}
 	}
 }
@@ -94,20 +102,23 @@ func cleanupClient(ws *websocket.Conn) {
 	client, exists := clients[ws]
 	if !exists {
 		clientsMu.Unlock()
+		log.Printf("Cleanup skipped for %v: not in clients", ws.RemoteAddr())
 		return
 	}
-	if client.callID != "" {
-		handleHangup(ws, client.callID)
-	}
+	callID := client.callID
 	delete(clients, ws)
 	delete(idleClients, ws)
+	log.Printf("Removed client %v from clients and idleClients, remaining: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
+	if callID != "" {
+		handleHangup(ws, callID)
+	}
 	removeFromAllRooms(ws)
 
-	// Close connection only if not already closed
+	// Close connection safely
 	if err := ws.Close(); err != nil && !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-		log.Printf("Error closing WebSocket: %v", err)
+		log.Printf("Error closing WebSocket %v: %v", ws.RemoteAddr(), err)
 	}
 }
 
@@ -118,19 +129,21 @@ func removeFromAllRooms(conn *websocket.Conn) {
 		delete(room.clients, conn)
 		if len(room.clients) == 0 {
 			delete(rooms, callID)
-			log.Printf("Deleted empty room %s", callID)
+			log.Printf("Deleted empty room %s, remaining rooms: %d", callID, len(rooms))
 		} else {
-			// Notify remaining clients of disconnection
+			// Notify remaining clients
 			for client := range room.clients {
 				if err := client.WriteJSON(Message{
 					Type:   "peer_disconnected",
 					CallID: callID,
 				}); err != nil {
-					log.Printf("Error sending peer_disconnected to %v: %v", client.RemoteAddr(), err)
+					log.Printf("Error sending peer_disconnected to %v in room %s: %v", client.RemoteAddr(), callID, err)
+					go cleanupClient(client)
 				}
 			}
 		}
 	}
+	log.Printf("Removed %v from all rooms, remaining rooms: %d", conn.RemoteAddr(), len(rooms))
 }
 
 func handleOffer(sender *websocket.Conn, msg Message) {
@@ -152,6 +165,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 		client.callID = msg.CallID
 		delete(idleClients, sender)
 	}
+	log.Printf("Client %v set callID %s, idle clients: %d", sender.RemoteAddr(), msg.CallID, len(idleClients))
 	clientsMu.Unlock()
 }
 
@@ -168,7 +182,8 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 
 	if !exists {
 		if err := conn.WriteJSON(Message{Type: "error", Data: "Call offer not found or expired"}); err != nil {
-			log.Printf("Error sending error message: %v", err)
+			log.Printf("Error sending error message to %v: %v", conn.RemoteAddr(), err)
+			go cleanupClient(conn)
 		}
 		return
 	}
@@ -178,37 +193,38 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 		client.callID = callID
 		delete(idleClients, conn)
 	}
+	idleClientsCopy := make(map[*websocket.Conn]bool)
+	for k, v := range idleClients {
+		idleClientsCopy[k] = v
+	}
 	clientsMu.Unlock()
 
 	if offer != nil {
 		if err := conn.WriteJSON(*offer); err != nil {
-			log.Printf("Failed to send offer to callee: %v", err)
+			log.Printf("Failed to send offer to %v: %v", conn.RemoteAddr(), err)
+			go cleanupClient(conn)
 			return
 		}
 		if err := conn.WriteJSON(Message{Type: "call_joined", CallID: callID}); err != nil {
-			log.Printf("Failed to send call_joined: %v", err)
+			log.Printf("Failed to send call_joined to %v: %v", conn.RemoteAddr(), err)
+			go cleanupClient(conn)
 			return
 		}
 	}
 
-	// Notify other idle clients
-	clientsMu.Lock()
-	for other := range idleClients {
+	for other := range idleClientsCopy {
 		if other != conn {
 			if err := other.WriteJSON(Message{
 				Type:   "call_taken",
 				CallID: callID,
 			}); err != nil {
-				log.Printf("Error sending call_taken: %v", err)
-				delete(clients, other)
-				delete(idleClients, other)
+				log.Printf("Error sending call_taken to %v: %v", other.RemoteAddr(), err)
 				go cleanupClient(other)
 			}
 		}
 	}
-	clientsMu.Unlock()
 
-	log.Printf("User accepted call %s", callID)
+	log.Printf("User %v accepted call %s", conn.RemoteAddr(), callID)
 }
 
 func handleAnswer(sender *websocket.Conn, msg Message) {
@@ -225,7 +241,7 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Unlock()
 
 	if !exists {
-		log.Printf("Answer for non-existent call %s", msg.CallID)
+		log.Printf("Answer for non-existent call %s from %v", msg.CallID, sender.RemoteAddr())
 		return
 	}
 
@@ -237,8 +253,8 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 
 	for client := range roomClients {
 		if client != sender {
-			if err := client.WriteJSON(msg); err != nil {
-				log.Printf("Error sending answer: %v", err)
+			if err := client.WriteJSON(msg); errLDu 
+				log.Printf("Error sending answer to %v: %v", client.RemoteAddr(), err)
 				go cleanupClient(client)
 			}
 		}
@@ -258,14 +274,14 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 	roomsMu.Unlock()
 
 	if !exists {
-		log.Printf("No room found for ICE candidate call %s", msg.CallID)
+		log.Printf("No room found for ICE candidate call %s from %v", msg.CallID, sender.RemoteAddr())
 		return
 	}
 
 	for client := range roomClients {
 		if client != sender {
 			if err := client.WriteJSON(msg); err != nil {
-				log.Printf("Error sending ICE candidate: %v", err)
+				log.Printf("Error sending ICE candidate to %v: %v", client.RemoteAddr(), err)
 				go cleanupClient(client)
 			}
 		}
@@ -287,7 +303,8 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 			Type: "error",
 			Data: "Call not found or not yet started",
 		}); err != nil {
-			log.Printf("Error sending error message: %v", err)
+			log.Printf("Error sending error message to %v: %v", sender.RemoteAddr(), err)
+			go cleanupClient(sender)
 		}
 		return
 	}
@@ -300,12 +317,14 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 
 	if offer != nil {
 		if err := sender.WriteJSON(*offer); err != nil {
-			log.Printf("Error sending offer: %v", err)
+			log.Printf("Error sending offer to %v: %v", sender.RemoteAddr(), err)
+			go cleanupClient(sender)
 			return
 		}
 	}
 	if err := sender.WriteJSON(Message{Type: "call_joined", CallID: msg.CallID}); err != nil {
-		log.Printf("Error sending call_joined: %v", err)
+		log.Printf("Error sending call_joined to %v: %v", sender.RemoteAddr(), err)
+		go cleanupClient(sender)
 	}
 }
 
@@ -321,12 +340,13 @@ func handleHangup(sender *websocket.Conn, callID string) {
 		}
 		if len(room.clients) == 0 {
 			delete(rooms, callID)
-			log.Printf("Deleted empty room %s", callID)
+			log.Printf("Deleted empty room %s, remaining rooms: %d", callID, len(rooms))
 		}
 	}
 	roomsMu.Unlock()
 
 	if !exists {
+		log.Printf("Hangup for non-existent call %s from %v", callID, sender.RemoteAddr())
 		return
 	}
 
@@ -335,7 +355,7 @@ func handleHangup(sender *websocket.Conn, callID string) {
 			Type:   "peer_disconnected",
 			CallID: callID,
 		}); err != nil {
-			log.Printf("Error sending peer_disconnected: %v", err)
+			log.Printf("Error sending peer_disconnected to %v: %v", client.RemoteAddr(), err)
 			go cleanupClient(client)
 		}
 	}
@@ -344,6 +364,7 @@ func handleHangup(sender *websocket.Conn, callID string) {
 	if c, ok := clients[sender]; ok {
 		c.callID = ""
 		idleClients[sender] = true
+		log.Printf("Client %v set to idle, idle clients: %d", sender.RemoteAddr(), len(idleClients))
 	}
 	clientsMu.Unlock()
 }
@@ -377,10 +398,45 @@ func handleIncomingCall(sender *websocket.Conn, msg Message) {
 				CallID: callID,
 				From:   msg.From,
 			}); err != nil {
-				log.Printf("Error sending incoming call: %v", err)
+				log.Printf("Error sending incoming call to %v: %v", conn.RemoteAddr(), err)
 				go cleanupClient(conn)
 			}
 		}
+	}
+
+	log.Printf("Incoming call %s from %v, notified %d idle clients", callID, sender.RemoteAddr(), len(idleClientsCopy))
+}
+
+// Periodic cleanup for stale rooms and clients
+func cleanupStaleResources() {
+	for {
+		time.Sleep(30 * time.Second)
+		roomsMu.Lock()
+		for callID, room := range rooms {
+			for client := range room.clients {
+				if _, exists := clients[client]; !exists {
+					delete(room.clients, client)
+					log.Printf("Removed stale client %v from room %s", client.RemoteAddr(), callID)
+				}
+			}
+			if len(room.clients) == 0 {
+				delete(rooms, callID)
+				log.Printf("Deleted stale empty room %s", callID)
+			}
+		}
+		roomsMu.Unlock()
+
+		clientsMu.Lock()
+		for ws, client := range clients {
+			if ws.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)) != nil {
+				delete(clients, ws)
+				delete(idleClients, ws)
+				log.Printf("Removed stale client %v", ws.RemoteAddr())
+				go cleanupClient(ws)
+			}
+		}
+		log.Printf("Cleanup complete, clients: %d, idle: %d, rooms: %d", len(clients), len(idleClients), len(rooms))
+		clientsMu.Unlock()
 	}
 }
 
@@ -388,6 +444,9 @@ func main() {
 	fs := http.FileServer(http.Dir("./client"))
 	http.Handle("/", fs)
 	http.HandleFunc("/ws", handleConnections)
+
+	// Start periodic cleanup
+	go cleanupStaleResources()
 
 	log.Println("WebSocket signaling server running on :8000")
 	err := http.ListenAndServe(":8000", nil)
