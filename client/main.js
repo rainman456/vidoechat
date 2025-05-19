@@ -196,14 +196,20 @@ function connectSocket() {
     }
   
     // Match or reject unknown callId
-    if (msg.callId && !currentCallId) {
-      currentCallId = msg.callId;
-      callInput.value = currentCallId;
-      console.log(`Initialized currentCallId from incoming message: ${currentCallId}`);
-    } else if (msg.callId && msg.callId !== currentCallId) {
-      console.warn(`Received message for different callId: ${msg.callId}. Current: ${currentCallId}. Ignoring.`);
-      return;
-    }
+   if (msg.callId && !currentCallId) {
+  // First time we get a callId, initialize it
+  currentCallId = msg.callId;
+  callInput.value = currentCallId;
+  console.log(`Initialized currentCallId from incoming message: ${currentCallId}`);
+} else if (msg.callId && msg.callId !== currentCallId) {
+  // New callId differs from current -> reset everything for new call
+  console.warn(`New callId received (${msg.callId}) differs from current (${currentCallId}). Resetting state.`);
+  resetCallState();
+  currentCallId = msg.callId;
+  callInput.value = currentCallId;
+  pc = createPeerConnection();
+}
+
   
     try {
       if (msg.type === "offer" && !isCaller) {
