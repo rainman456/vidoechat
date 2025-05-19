@@ -269,9 +269,34 @@ callButton.onclick = async () => {
   callInput.value = currentCallId;
   callInput.readOnly = true;
 
- if (!socket || socket.readyState !== WebSocket.OPEN) {
-  connectSocket();
-}
+ const sendOfferAndIncomingCall = async () => {
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      socket.send(JSON.stringify({
+        type: "offer",
+        callId: currentCallId,
+        data: JSON.stringify(pc.localDescription),
+      }));
+
+      socket.send(JSON.stringify({
+        type: "incoming_call",
+        callId: currentCallId,
+        from: "Caller"
+      }));
+    } catch (e) {
+      console.error("Error sending offer or incoming_call:", e);
+    }
+  };
+
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    connectSocket();
+
+    socket.addEventListener("open", sendOfferAndIncomingCall, { once: true });
+  } else {
+    await sendOfferAndIncomingCall();
+  }
 // Delay this until socket is open
   
 };
