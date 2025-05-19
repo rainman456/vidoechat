@@ -2,9 +2,42 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="style.css">
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+     <link rel="stylesheet" href="style.css">
     <title>WebRTC Demo</title>
+    <style>
+      .videos {
+        display: flex;
+        gap: 20px;
+      }
+      video {
+        width: 320px;
+        height: 240px;
+        background: #000; /* Black background for visibility */
+        border: 2px solid #333; /* Border to highlight video area */
+      }
+      #connectionStatus {
+        margin: 10px 0;
+        padding: 5px;
+        font-weight: bold;
+      }
+      .status-disconnected { color: red; }
+      .status-connecting { color: orange; }
+      .status-connected { color: green; }
+      button {
+        margin: 5px;
+        padding: 10px;
+      }
+      #incomingModal {
+        display: none;
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+      }
+    </style>
   </head>
   <body>
     <h2>1. Start your Webcam</h2>
@@ -17,8 +50,6 @@
         <h3>Remote Stream</h3>
         <video id="remoteVideo" autoplay playsinline></video>
       </span>
-
-
     </div>
 
     <button id="webcamButton">Start webcam</button>
@@ -32,36 +63,23 @@
     <button id="answerButton" disabled>Answer</button>
 
     <h2>4. Hangup</h2>
-
     <button id="hangupButton" disabled>Hangup</button>
     <div id="statusText" style="margin: 10px 0; font-weight: bold;"></div>
     <div id="connectionStatus" class="status-disconnected">Disconnected</div>
     <button id="muteAudioBtn">Mute Audio</button>
-   <button id="toggleVideoBtn">Toggle Camera</button>
+    <button id="toggleVideoBtn">Toggle Camera</button>
 
+    <!-- Incoming call modal -->
+    <div id="incomingModal">
+      <h2>📞 Incoming Call</h2>
+      <p>Someone is calling you...</p>
+      <button id="acceptCallBtn" style="margin: 10px;">✅ Accept</button>
+      <button id="rejectCallBtn" style="margin: 10px;">❌ Reject</button>
+    </div>
 
-     <!-- Incoming call modal -->
-<div id="incomingModal" style="
-  display: none;
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
-  align-items: center;
-  justify-content: center;
-  z-index: 9999;">
-  <h2>📞 Incoming Call</h2>
-  <p>Someone is calling you...</p>
-  <button id="acceptCallBtn" style="margin: 10px;">✅ Accept</button>
-  <button id="rejectCallBtn" style="margin: 10px;">❌ Reject</button>
-</div>
+    <!-- Optional ringtone -->
+    <audio id="ringtone" src="facetime_ringtone.mp3" preload="auto" loop></audio>
 
-
-<!-- Optional ringtone -->
-<audio id="ringtone" src="facetime_ringtone.mp3" preload="auto" loop></audio>
-
-
-
-    <script  src="/main.js"></script>
-
+    <script src="/main.js"></script>
   </body>
 </html>
