@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -41,48 +40,30 @@ var (
 )
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Printf("Recovered from panic: %v", rec)
-		}
-	}()
-
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("error upgrading connection: %v", err)
+		log.Printf("Error upgrading connection: %v", err)
 		return
 	}
 
 	clientsMu.Lock()
-	clients[ws] = &Client{conn: ws}
+	client := &Client{conn: ws}
+	clients[ws] = client
 	idleClients[ws] = true
 	clientsMu.Unlock()
 
 	defer func() {
-		clientsMu.Lock()
-		client := clients[ws]
-		if client != nil && client.callID != "" {
-			handleHangup(ws, client.callID)
-		}
-		delete(clients, ws)
-		delete(idleClients, ws)
-		clientsMu.Unlock()
-
-		removeFromAllRooms(ws)
-		ws.Close()
+		cleanupClient(ws)
 	}()
 
 	for {
 		var msg Message
 		err := ws.ReadJSON(&msg)
 		if err != nil {
-			if websocket.IsCloseError(err,
-				websocket.CloseGoingAway,
-				websocket.CloseNormalClosure,
-				websocket.CloseNoStatusReceived) {
-				log.Printf("client disconnected: %v", err)
+			if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
+				log.Printf("Client disconnected: %v", err)
 			} else {
-				log.Printf("unexpected WebSocket error: %v", err)
+				log.Printf("Unexpected WebSocket error: %v", err)
 			}
 			break
 		}
@@ -99,20 +80,56 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		case "ice-candidate":
 			handleICECandidate(ws, msg)
 		case "join_call":
-		 handleJoinCall(ws, msg)
+			handleJoinCall(ws, msg)
 		case "hangup":
 			handleHangup(ws, msg.CallID)
 		default:
-			log.Printf("unknown message type: %s", msg.Type)
+			log.Printf("Unknown message type: %s", msg.Type)
 		}
+	}
+}
+
+func cleanupClient(ws *websocket.Conn) {
+	clientsMu.Lock()
+	client, exists := clients[ws]
+	if !exists {
+		clientsMu.Unlock()
+		return
+	}
+	if client.callID != "" {
+		handleHangup(ws, client.callID)
+	}
+	delete(clients, ws)
+	delete(idleClients, ws)
+	clientsMu.Unlock()
+
+	removeFromAllRooms(ws)
+
+	// Close connection only if not already closed
+	if err := ws.Close(); err != nil && !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+		log.Printf("Error closing WebSocket: %v", err)
 	}
 }
 
 func removeFromAllRooms(conn *websocket.Conn) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
-	for _, room := range rooms {
+	for callID, room := range rooms {
 		delete(room.clients, conn)
+		if len(room.clients) == 0 {
+			delete(rooms, callID)
+			log.Printf("Deleted empty room %s", callID)
+		} else {
+			// Notify remaining clients of disconnection
+			for client := range room.clients {
+				if err := client.WriteJSON(Message{
+					Type:   "peer_disconnected",
+					CallID: callID,
+				}); err != nil {
+					log.Printf("Error sending peer_disconnected to %v: %v", client.RemoteAddr(), err)
+				}
+			}
+		}
 	}
 }
 
@@ -133,8 +150,8 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	clientsMu.Lock()
 	if client, ok := clients[sender]; ok {
 		client.callID = msg.CallID
+		delete(idleClients, sender)
 	}
-	delete(idleClients, sender) // Remove caller from idleClients
 	clientsMu.Unlock()
 }
 
@@ -142,38 +159,51 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 	callID := msg.CallID
 	roomsMu.Lock()
 	room, exists := rooms[callID]
+	var offer *Message
+	if exists {
+		offer = room.offer
+		room.clients[conn] = true
+	}
+	roomsMu.Unlock()
+
 	if !exists {
-		roomsMu.Unlock()
-		_ = conn.WriteJSON(Message{Type: "error", Data: "Call offer not found or expired"})
+		if err := conn.WriteJSON(Message{Type: "error", Data: "Call offer not found or expired"}); err != nil {
+			log.Printf("Error sending error message: %v", err)
+		}
 		return
 	}
-	room.clients[conn] = true
-	offer := room.offer
-	roomsMu.Unlock()
 
 	clientsMu.Lock()
 	if client, ok := clients[conn]; ok {
 		client.callID = callID
+		delete(idleClients, conn)
 	}
-	delete(idleClients, conn)
 	clientsMu.Unlock()
 
 	if offer != nil {
-		err := conn.WriteJSON(*offer)
-		if err != nil {
+		if err := conn.WriteJSON(*offer); err != nil {
 			log.Printf("Failed to send offer to callee: %v", err)
+			return
 		}
-		conn.WriteJSON(Message{Type: "call_joined", CallID: callID})
+		if err := conn.WriteJSON(Message{Type: "call_joined", CallID: callID}); err != nil {
+			log.Printf("Failed to send call_joined: %v", err)
+			return
+		}
 	}
 
 	// Notify other idle clients
 	clientsMu.Lock()
 	for other := range idleClients {
 		if other != conn {
-			_ = other.WriteJSON(Message{
+			if err := other.WriteJSON(Message{
 				Type:   "call_taken",
 				CallID: callID,
-			})
+			}); err != nil {
+				log.Printf("Error sending call_taken: %v", err)
+				delete(clients, other)
+				delete(idleClients, other)
+				go cleanupClient(other)
+			}
 		}
 	}
 	clientsMu.Unlock()
@@ -184,13 +214,20 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
+	var roomClients map[*websocket.Conn]bool
+	if exists {
+		room.clients[sender] = true
+		roomClients = make(map[*websocket.Conn]bool)
+		for k, v := range room.clients {
+			roomClients[k] = v
+		}
+	}
+	roomsMu.Unlock()
+
 	if !exists {
-		roomsMu.Unlock()
 		log.Printf("Answer for non-existent call %s", msg.CallID)
 		return
 	}
-	room.clients[sender] = true
-	roomsMu.Unlock()
 
 	clientsMu.Lock()
 	if client, ok := clients[sender]; ok {
@@ -198,12 +235,11 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 	}
 	clientsMu.Unlock()
 
-	for client := range room.clients {
+	for client := range roomClients {
 		if client != sender {
-			err := client.WriteJSON(msg)
-			if err != nil {
-				log.Printf("error sending answer: %v", err)
-				client.Close()
+			if err := client.WriteJSON(msg); err != nil {
+				log.Printf("Error sending answer: %v", err)
+				go cleanupClient(client)
 			}
 		}
 	}
@@ -212,18 +248,25 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 func handleICECandidate(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
+	var roomClients map[*websocket.Conn]bool
+	if exists {
+		roomClients = make(map[*websocket.Conn]bool)
+		for k, v := range room.clients {
+			roomClients[k] = v
+		}
+	}
 	roomsMu.Unlock()
+
 	if !exists {
 		log.Printf("No room found for ICE candidate call %s", msg.CallID)
 		return
 	}
 
-	for client := range room.clients {
+	for client := range roomClients {
 		if client != sender {
-			err := client.WriteJSON(msg)
-			if err != nil {
-				log.Printf("error sending ICE candidate: %v", err)
-				client.Close()
+			if err := client.WriteJSON(msg); err != nil {
+				log.Printf("Error sending ICE candidate: %v", err)
+				go cleanupClient(client)
 			}
 		}
 	}
@@ -232,16 +275,22 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 func handleJoinCall(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
+	var offer *Message
+	if exists {
+		offer = room.offer
+		room.clients[sender] = true
+	}
+	roomsMu.Unlock()
+
 	if !exists {
-		roomsMu.Unlock()
-		_ = sender.WriteJSON(Message{
-			Type: "error", Data: "Call not found or not yet started",
-		})
+		if err := sender.WriteJSON(Message{
+			Type: "error",
+			Data: "Call not found or not yet started",
+		}); err != nil {
+			log.Printf("Error sending error message: %v", err)
+		}
 		return
 	}
-	room.clients[sender] = true
-	offer := room.offer
-	roomsMu.Unlock()
 
 	clientsMu.Lock()
 	if client, ok := clients[sender]; ok {
@@ -250,31 +299,46 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	clientsMu.Unlock()
 
 	if offer != nil {
-		_ = sender.WriteJSON(*offer)
+		if err := sender.WriteJSON(*offer); err != nil {
+			log.Printf("Error sending offer: %v", err)
+			return
+		}
 	}
-	_ = sender.WriteJSON(Message{Type: "call_joined", CallID: msg.CallID})
+	if err := sender.WriteJSON(Message{Type: "call_joined", CallID: msg.CallID}); err != nil {
+		log.Printf("Error sending call_joined: %v", err)
+	}
 }
 
 func handleHangup(sender *websocket.Conn, callID string) {
 	roomsMu.Lock()
 	room, exists := rooms[callID]
+	var roomClients map[*websocket.Conn]bool
+	if exists {
+		delete(room.clients, sender)
+		roomClients = make(map[*websocket.Conn]bool)
+		for k, v := range room.clients {
+			roomClients[k] = v
+		}
+		if len(room.clients) == 0 {
+			delete(rooms, callID)
+			log.Printf("Deleted empty room %s", callID)
+		}
+	}
+	roomsMu.Unlock()
+
 	if !exists {
-		roomsMu.Unlock()
 		return
 	}
 
-	delete(room.clients, sender)
-	for client := range room.clients {
-		_ = client.WriteJSON(Message{
+	for client := range roomClients {
+		if err := client.WriteJSON(Message{
 			Type:   "peer_disconnected",
 			CallID: callID,
-		})
+		}); err != nil {
+			log.Printf("Error sending peer_disconnected: %v", err)
+			go cleanupClient(client)
+		}
 	}
-	if len(room.clients) == 0 {
-		delete(rooms, callID)
-		log.Printf("Deleted empty room %s", callID)
-	}
-	roomsMu.Unlock()
 
 	clientsMu.Lock()
 	if c, ok := clients[sender]; ok {
@@ -298,24 +362,26 @@ func handleIncomingCall(sender *websocket.Conn, msg Message) {
 	clientsMu.Lock()
 	if client, ok := clients[sender]; ok {
 		client.callID = callID
+		delete(idleClients, sender)
 	}
-	delete(idleClients, sender) // Remove caller from idleClients
-	for conn := range idleClients {
+	idleClientsCopy := make(map[*websocket.Conn]bool)
+	for k, v := range idleClients {
+		idleClientsCopy[k] = v
+	}
+	clientsMu.Unlock()
+
+	for conn := range idleClientsCopy {
 		if conn != sender {
-			err := conn.WriteJSON(Message{
+			if err := conn.WriteJSON(Message{
 				Type:   "incoming_call",
 				CallID: callID,
 				From:   msg.From,
-			})
-			if err != nil {
-				log.Printf("error sending incoming call: %v", err)
-				delete(clients, conn)
-				delete(idleClients, conn)
-				conn.Close()
+			}); err != nil {
+				log.Printf("Error sending incoming call: %v", err)
+				go cleanupClient(conn)
 			}
 		}
 	}
-	clientsMu.Unlock()
 }
 
 func main() {
