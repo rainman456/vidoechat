@@ -48,8 +48,6 @@ let pendingCandidates = [];
 const webcamButton = document.getElementById('webcamButton');
 const webcamVideo = document.getElementById('webcamVideo');
 const callButton = document.getElementById('callButton');
-const callInput = document.getElementById('callInput');
-const answerButton = document.getElementById('answerButton');
 const remoteVideo = document.getElementById('remoteVideo');
 const hangupButton = document.getElementById('hangupButton');
 const incomingModal = document.getElementById('incomingModal');
@@ -60,6 +58,7 @@ const muteAudioBtn = document.getElementById('muteAudioBtn');
 const toggleVideoBtn = document.getElementById('toggleVideoBtn');
 const statusText = document.getElementById('statusText');
 const connectionStatus = document.getElementById('connectionStatus');
+const userCount = document.getElementById('userCount');
 
 let audioMuted = false;
 let videoOff = false;
@@ -72,6 +71,12 @@ function updateConnectionStatus(state) {
     if (connectionStatus) {
         connectionStatus.textContent = state;
         connectionStatus.className = `status-${state.toLowerCase()}`;
+    }
+}
+
+function updateUserCount(count) {
+    if (userCount) {
+        userCount.textContent = `Users connected: ${count}`;
     }
 }
 
@@ -97,7 +102,7 @@ toggleVideoBtn.onclick = () => {
 
 function createPeerConnection() {
     if (pc && pc.signalingState !== 'closed') {
-        return pc; // Reuse existing connection if not closed
+        return pc;
     }
 
     pc = new RTCPeerConnection(servers);
@@ -163,7 +168,6 @@ webcamButton.onclick = async () => {
 
         webcamVideo.srcObject = localStream;
         callButton.disabled = false;
-        answerButton.disabled = false;
         webcamButton.disabled = true;
         updateStatus("Webcam started");
     } catch (e) {
@@ -195,7 +199,7 @@ function connectSocket(onOpenCallback = () => {}) {
         console.warn("WebSocket connection closed.");
         alert("Disconnected from signaling server. Attempting to reconnect...");
         updateStatus("Disconnected from signaling server");
-        // Attempt to reconnect after a delay
+        console.log("Attempting WebSocket reconnect in 3 seconds...");
         setTimeout(() => connectSocket(), 3000);
     };
 
@@ -219,6 +223,11 @@ function connectSocket(onOpenCallback = () => {}) {
             return;
         }
 
+        if (msg.type === "user_count") {
+            updateUserCount(msg.count || 0);
+            return;
+        }
+
         if (msg.type === "incoming_call" && !isCaller) {
             if (!localStream) await webcamButton.onclick();
             showIncomingModal(msg.callId, msg.from || "Unknown");
@@ -236,7 +245,6 @@ function connectSocket(onOpenCallback = () => {}) {
 
         if (msg.callId && !currentCallId) {
             currentCallId = msg.callId;
-            callInput.value = currentCallId;
             console.log(`Initialized currentCallId: ${currentCallId}`);
             updateStatus(`Call ID set: ${currentCallId}`);
         } else if (msg.callId && msg.callId !== currentCallId) {
@@ -315,8 +323,6 @@ callButton.onclick = async () => {
 
     isCaller = true;
     currentCallId = "call_" + crypto.randomUUID();
-    callInput.value = currentCallId;
-    callInput.readOnly = true;
 
     const sendOfferAndIncomingCall = async () => {
         try {
@@ -345,27 +351,6 @@ callButton.onclick = async () => {
     };
 
     connectSocket(sendOfferAndIncomingCall);
-};
-
-answerButton.onclick = async () => {
-    if (!localStream) await webcamButton.onclick();
-
-    isCaller = false;
-    currentCallId = callInput.value.trim();
-    callInput.readOnly = true;
-
-    if (!currentCallId) {
-        alert("Please enter a Call ID to answer.");
-        callInput.readOnly = false;
-        updateStatus("Error: No Call ID provided");
-        return;
-    }
-    hideIncomingModal();
-    updateStatus("Joining call");
-
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-        connectSocket();
-    }
 };
 
 hangupButton.onclick = async () => {
@@ -413,13 +398,7 @@ function resetCallState() {
     isCaller = false;
     pendingCandidates = [];
 
-    if (callInput) {
-        callInput.value = "";
-        callInput.readOnly = false;
-    }
-
     callButton.disabled = true;
-    answerButton.disabled = true;
     hangupButton.disabled = true;
     webcamButton.disabled = false;
 
@@ -427,7 +406,6 @@ function resetCallState() {
     updateStatus("Call ended");
     updateConnectionStatus("Disconnected");
 
-    // Reconnect WebSocket to ensure new calls can be initiated
     setTimeout(() => connectSocket(), 1000);
 }
 
@@ -451,14 +429,12 @@ function hideIncomingModal() {
 
 // Initial state
 callButton.disabled = true;
-answerButton.disabled = true;
 hangupButton.disabled = true;
 
 acceptCallBtn.onclick = async () => {
     hideIncomingModal();
     isCaller = false;
-    callInput.value = currentCallId;
-    callInput.readOnly = true;
+    if (!localStream) await webcamButton.onclick();
     if (!socket || socket.readyState !== WebSocket.OPEN) {
         connectSocket();
     }
@@ -476,4 +452,4 @@ rejectCallBtn.onclick = () => {
 
 window.addEventListener('load', () => {
     connectSocket();
-});
+})
