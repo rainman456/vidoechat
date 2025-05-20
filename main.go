@@ -28,7 +28,7 @@ type Message struct {
 	CallID string `json:"callId,omitempty"`
 	Data   string `json:"data,omitempty"`
 	From   string `json:"from,omitempty"`
-	Count  int    `json:"count,omitempty"` // Added for user_count
+	Count  int    `json:"count,omitempty"`
 }
 
 // Room represents a call session
@@ -86,7 +86,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	log.Printf("New client connected: %v, total clients: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
-	broadcastUserCount() // Notify all clients of new connection
+	broadcastUserCount()
 
 	defer cleanupClient(ws)
 
@@ -150,7 +150,7 @@ func cleanupClient(ws *websocket.Conn) {
 		log.Printf("Error closing WebSocket %v: %v", ws.RemoteAddr(), err)
 	}
 
-	broadcastUserCount() // Notify all clients of disconnection
+	broadcastUserCount()
 }
 
 // removeFromAllRooms removes a client from all rooms
@@ -182,7 +182,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
 	if !exists {
-		room = &Room{clients: make(map[*websocket.Conn 。bool)}
+		room = &Room{clients: make(map[*websocket.Conn]bool)}
 		rooms[msg.CallID] = room
 		log.Printf("Created new room for call %s", msg.CallID)
 	}
@@ -359,7 +359,7 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	}
 	if err := sender.WriteJSON(Message{Type: "call_joined", CallID: msg.CallID}); err != nil {
 		log.Printf("Error sending call_joined to %v: %v", sender.RemoteAddr(), err)
-			go cleanupClient(sender)
+		go cleanupClient(sender)
 	}
 }
 
@@ -474,7 +474,7 @@ func cleanupStaleResources() {
 		log.Printf("Cleanup complete, clients: %d, idle: %d, rooms: %d", len(clients), len(idleClients), len(rooms))
 		clientsMu.Unlock()
 
-		broadcastUserCount() // Update user count after cleanup
+		broadcastUserCount()
 	}
 }
 
