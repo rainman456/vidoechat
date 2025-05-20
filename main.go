@@ -76,14 +76,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set read deadline to detect stale connections
 	ws.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	clientsMu.Lock()
 	client := &Client{conn: ws}
 	clients[ws] = client
 	idleClients[ws] = true
-	log.Printf("New client connected: %v, total clients: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
+	log.Printf("New client %v connected, total: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
 	broadcastUserCount()
@@ -101,7 +100,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// Reset read deadline
 		ws.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch msg.Type {
@@ -137,7 +135,7 @@ func cleanupClient(ws *websocket.Conn) {
 	callID := client.callID
 	delete(clients, ws)
 	delete(idleClients, ws)
-	log.Printf("Removed client %v, remaining clients: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
+	log.Printf("Removed client %v, remaining: %d, idle: %d", ws.RemoteAddr(), len(clients), len(idleClients))
 	clientsMu.Unlock()
 
 	if callID != "" {
@@ -145,7 +143,6 @@ func cleanupClient(ws *websocket.Conn) {
 	}
 	removeFromAllRooms(ws)
 
-	// Close connection safely
 	if err := ws.Close(); err != nil && !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 		log.Printf("Error closing WebSocket %v: %v", ws.RemoteAddr(), err)
 	}
@@ -161,7 +158,7 @@ func removeFromAllRooms(conn *websocket.Conn) {
 		delete(room.clients, conn)
 		if len(room.clients) == 0 {
 			delete(rooms, callID)
-			log.Printf("Deleted empty room %s, remaining rooms: %d", callID, len(rooms))
+			log.Printf("Deleted empty room %s, remaining: %d", callID, len(rooms))
 		} else {
 			for client := range room.clients {
 				if err := client.WriteJSON(Message{
@@ -174,7 +171,7 @@ func removeFromAllRooms(conn *websocket.Conn) {
 			}
 		}
 	}
-	log.Printf("Removed %v from all rooms, remaining rooms: %d", conn.RemoteAddr(), len(rooms))
+	log.Printf("Removed %v from all rooms, remaining: %d", conn.RemoteAddr(), len(rooms))
 }
 
 // handleOffer processes offer messages
@@ -184,11 +181,9 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	if !exists {
 		room = &Room{clients: make(map[*websocket.Conn]bool)}
 		rooms[msg.CallID] = room
-		log.Printf("Created new room for call %s", msg.CallID)
+		log.Printf("Created room %s", msg.CallID)
 	}
-	if room.offer == nil {
-		room.offer = &msg
-	}
+	room.offer = &msg
 	room.clients[sender] = true
 	roomsMu.Unlock()
 
@@ -197,15 +192,14 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 		client.callID = msg.CallID
 		delete(idleClients, sender)
 	}
-	log.Printf("Client %v set callID %s, idle clients: %d", sender.RemoteAddr(), msg.CallID, len(idleClients))
+	log.Printf("Client %v set callID %s, idle: %d", sender.RemoteAddr(), msg.CallID, len(idleClients))
 	clientsMu.Unlock()
 }
 
 // handleAcceptCall processes call acceptance
 func handleAcceptCall(conn *websocket.Conn, msg Message) {
-	callID := msg.CallID
 	roomsMu.Lock()
-	room, exists := rooms[callID]
+	room, exists := rooms[msg.CallID]
 	var offer *Message
 	if exists {
 		offer = room.offer
@@ -213,8 +207,8 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 	}
 	roomsMu.Unlock()
 
-	if !exists {
-		if err := conn.WriteJSON(Message{Type: "error", Data: "Call offer not found"}); err != nil {
+	if !exists || offer == nil {
+		if err := conn.WriteJSON(Message{Type: "error", Data: "Call not found"}); err != nil {
 			log.Printf("Error sending error to %v: %v", conn.RemoteAddr(), err)
 			go cleanupClient(conn)
 		}
@@ -223,7 +217,7 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 
 	clientsMu.Lock()
 	if client, ok := clients[conn]; ok {
-		client.callID = callID
+		client.callID = msg.CallID
 		delete(idleClients, conn)
 	}
 	idleClientsCopy := make(map[*websocket.Conn]bool)
@@ -232,31 +226,29 @@ func handleAcceptCall(conn *websocket.Conn, msg Message) {
 	}
 	clientsMu.Unlock()
 
-	if offer != nil {
-		if err := conn.WriteJSON(*offer); err != nil {
-			log.Printf("Failed to send offer to %v: %v", conn.RemoteAddr(), err)
-			go cleanupClient(conn)
-			return
-		}
-		if err := conn.WriteJSON(Message{Type: "call_joined", CallID: callID}); err != nil {
-			log.Printf("Failed to send call_joined to %v: %v", conn.RemoteAddr(), err)
-			go cleanupClient(conn)
-			return
-		}
+	if err := conn.WriteJSON(*offer); err != nil {
+		log.Printf("Error sending offer to %v: %v", conn.RemoteAddr(), err)
+		go cleanupClient(conn)
+		return
+	}
+	if err := conn.WriteJSON(Message{Type: "call_joined", CallID: msg.CallID}); err != nil {
+		log.Printf("Error sending call_joined to %v: %v", conn.RemoteAddr(), err)
+		go cleanupClient(conn)
+		return
 	}
 
 	for other := range idleClientsCopy {
 		if other != conn {
 			if err := other.WriteJSON(Message{
 				Type:   "call_taken",
-				CallID: callID,
+				CallID: msg.CallID,
 			}); err != nil {
 				log.Printf("Error sending call_taken to %v: %v", other.RemoteAddr(), err)
 				go cleanupClient(other)
 			}
 		}
 	}
-	log.Printf("User %v accepted call %s", conn.RemoteAddr(), callID)
+	log.Printf("Client %v accepted call %s", conn.RemoteAddr(), msg.CallID)
 }
 
 // handleAnswer processes answer messages
@@ -274,7 +266,7 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Unlock()
 
 	if !exists {
-		log.Printf("Answer for non-existent call %s from %v", msg.CallID, sender.RemoteAddr())
+		log.Printf("No room for answer call %s from %v", msg.CallID, sender.RemoteAddr())
 		return
 	}
 
@@ -376,7 +368,7 @@ func handleHangup(sender *websocket.Conn, callID string) {
 		}
 		if len(room.clients) == 0 {
 			delete(rooms, callID)
-			log.Printf("Deleted empty room %s, remaining rooms: %d", callID, len(rooms))
+			log.Printf("Deleted empty room %s, remaining: %d", callID, len(rooms))
 		}
 	}
 	roomsMu.Unlock()
@@ -397,10 +389,10 @@ func handleHangup(sender *websocket.Conn, callID string) {
 	}
 
 	clientsMu.Lock()
-	if c, ok := clients[sender]; ok {
-		c.callID = ""
+	if client, ok := clients[sender]; ok {
+		client.callID = ""
 		idleClients[sender] = true
-		log.Printf("Client %v set to idle, idle clients: %d", sender.RemoteAddr(), len(idleClients))
+		log.Printf("Client %v set to idle, idle: %d", sender.RemoteAddr(), len(idleClients))
 	}
 	clientsMu.Unlock()
 }
