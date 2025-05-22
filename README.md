@@ -1,7 +1,7 @@
 # videochat
 
 ## Description
-# This is a very basic implementation of a one video call web app using goriila websockets and Webrtc it makes uses of rooms and client ids
+# This is a very basic implementation of a one to one video call web app using goriila websockets and Webrtc it makes uses of rooms and client ids to automatically connects random peers connected
 
 
 ## Usage
