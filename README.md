@@ -1,7 +1,7 @@
 # videochat
 
 ## Description
-#This is a very basic implementation of a one video call web app using goriila websockets and Webrtc it makes uses of rooms and client ids
+# This is a very basic implementation of a one video call web app using goriila websockets and Webrtc it makes uses of rooms and client ids
 
 
 ## Usage
@@ -18,11 +18,11 @@
 
 # you could choose to specify the port
 
-#I advice getting your turn server credentials from `https://dashboard.metered.ca/` and intialize the ICE servers in the main.js file at the top 
+# I advice getting your turn server credentials from `https://dashboard.metered.ca/` and intialize the ICE servers in the main.js file at the top 
 
-#`const servers=[]`
+# `const servers=[]`
 
-#I dont know much about javascript so the javascript code is gpt modified boilerplate code from fireship repo
+# I dont know much about javascript so the javascript code is gpt modified boilerplate code from fireship repo
 
 ## Contribution
 If you'd like to contribute to this repo please create a pull request with your additions
