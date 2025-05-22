@@ -40,7 +40,7 @@ type Room struct {
 // Global state
 var (
 	clients     = make(map[*websocket.Conn]*Client)
-	idleClients = make(map[*websocket.Conn]bool)
+	idleClients = make(map[*websocket.Conn]bool) //clients who are conncected but not in a call
 	rooms       = make(map[string]*Room)
 	clientsMu   sync.Mutex
 	roomsMu     sync.Mutex
