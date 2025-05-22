@@ -6,6 +6,8 @@
 //     ],
 //     iceCandidatePoolSize: 10,
 // };
+//initialize with turn server credentials
+
 const servers = {
      iceServers: [
       {
@@ -13,23 +15,23 @@ const servers = {
       },
       {
         urls: "turn:global.relay.metered.ca:80",
-        username: "e6166b934e60840d935743c7",
-        credential: "uNdKAwfH/TDOs6EP",
+        username: "",
+        credential: "",
       },
       {
         urls: "turn:global.relay.metered.ca:80?transport=tcp",
-        username: "e6166b934e60840d935743c7",
-        credential: "uNdKAwfH/TDOs6EP",
+        username: "",
+        credential: "",
       },
       {
         urls: "turn:global.relay.metered.ca:443",
-        username: "e6166b934e60840d935743c7",
-        credential: "uNdKAwfH/TDOs6EP",
+        username: "",
+        credential: "",
       },
       {
         urls: "turns:global.relay.metered.ca:443?transport=tcp",
-        username: "e6166b934e60840d935743c7",
-        credential: "uNdKAwfH/TDOs6EP",
+        username: "",
+        credential: "",
       },
     ],
     iceCandidatePoolSize: 10,
