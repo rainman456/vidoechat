@@ -1,7 +1,7 @@
 # videochat
 
 ## Description
- This is a very basic implementation of a one to one video call web app using goriila websockets and Webrtc api, it makes use of rooms and client ids to automatically connect random peers connected to the signaling server, here is the link to see how it looks live: https://videochat-k8rf.onrender.com/.Once you're on the site no need for registration just press call and hopefuly someone who's also connected might answer,might be me lol :)
+ This is a very basic implementation of a one to one video call web app using gorrila websockets and the WebRTC api, it makes use of rooms and client ids to automatically connect random peers connected to the signaling server, here is the link to see how it looks live: https://videochat-k8rf.onrender.com/.Once you're on the site no need for registration just press call and hopefuly someone who's also connected might answer,might be me lol :)
 
 
 ## Usage
@@ -27,3 +27,5 @@
 ## Contribution
 # If you'd like to contribute to this repo please create a pull request with your additions
 
+## Roadmap
+I'll be looking towards advancing this project soon enough ,i'll also use this for a full scale web service and  build a mobile and desktop application around it ,this will also be the first project i'll be discussing in detail in my upcoming and long awaited blog
